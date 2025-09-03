@@ -13,8 +13,6 @@ on:
 
 jobs:
   build:
-    # 仅在 secrets 设置了的情况下才运行，防止在 fork 的仓库中因缺少 secrets 而失败
-    if: secrets.KEYSTORE_BASE64 != ''
     runs-on: ubuntu-latest
 
     steps:
