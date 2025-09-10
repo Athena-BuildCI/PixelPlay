@@ -92,6 +92,11 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.PaddingValues
@@ -110,6 +115,7 @@ import com.theveloper.pixelplay.presentation.components.MiniPlayerHeight
 import com.theveloper.pixelplay.presentation.components.PlayerInternalNavigationBar
 import javax.annotation.concurrent.Immutable
 import androidx.core.net.toUri
+import com.theveloper.pixelplay.presentation.components.DismissUndoBar
 import com.theveloper.pixelplay.presentation.components.NavBarContentHeight
 import com.theveloper.pixelplay.presentation.components.NavBarContentHeightFullWidth
 import kotlin.math.pow
@@ -332,13 +338,22 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        val navBarStyle by playerViewModel.navBarStyle.collectAsState()
+
+        val systemNavBarInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+
+        val horizontalPadding = if (navBarStyle == NavBarStyle.DEFAULT) {
+            if (systemNavBarInset > 30.dp) 14.dp else systemNavBarInset
+        } else {
+            0.dp
+        }
+
         Scaffold(
             modifier = Modifier.fillMaxSize(),
             bottomBar = {
                 if (!shouldHideNavigationBar) {
                     val playerContentExpansionFraction = playerViewModel.playerContentExpansionFraction.value
                     val showPlayerContentArea = playerViewModel.stablePlayerState.collectAsState().value.currentSong != null
-                    val navBarStyle by playerViewModel.navBarStyle.collectAsState()
                     val navBarCornerRadius by playerViewModel.navBarCornerRadius.collectAsState()
                     val navBarElevation = 3.dp
 
@@ -399,9 +414,7 @@ class MainActivity : ComponentActivity() {
                         }
                     }
 
-                    val systemNavBarInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
 
-                    val horizontalPadding = if (navBarStyle == NavBarStyle.FULL_WIDTH) 0.dp else 12.dp
 
                     var componentHeightPx by remember { mutableStateOf(0) }
                     val animatedTranslationY by remember(navBarHideFraction, componentHeightPx) { derivedStateOf { componentHeightPx * navBarHideFraction } }
@@ -412,8 +425,17 @@ class MainActivity : ComponentActivity() {
                             .onSizeChanged { componentHeightPx = it.height }
                             .graphicsLayer { translationY = animatedTranslationY }
                     ) {
-                        val bottomPadding = if (navBarStyle == NavBarStyle.DEFAULT) systemNavBarInset else 0.dp
-                        val navHeight = if (navBarStyle == NavBarStyle.FULL_WIDTH) NavBarContentHeightFullWidth else NavBarContentHeight
+                        val navHeight: Dp
+                        val bottomPadding: Dp
+
+                        if (navBarStyle == NavBarStyle.DEFAULT) {
+                            navHeight = NavBarContentHeight
+                            bottomPadding = systemNavBarInset
+                        } else { // FULL_WIDTH
+                            navHeight = NavBarContentHeightFullWidth + systemNavBarInset
+                            bottomPadding = 0.dp
+                        }
+
                         Surface(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -468,10 +490,37 @@ class MainActivity : ComponentActivity() {
                 UnifiedPlayerSheet(
                     playerViewModel = playerViewModel,
                     sheetCollapsedTargetY = sheetCollapsedTargetY,
-                    collapsedStateHorizontalPadding = 12.dp,
+                    collapsedStateHorizontalPadding = horizontalPadding,
                     hideMiniPlayer = shouldHideMiniPlayer,
-                    containerHeight = containerHeight
+                    containerHeight = containerHeight,
+                    isNavBarHidden = shouldHideNavigationBar
                 )
+
+                val playerUiState by playerViewModel.playerUiState.collectAsState()
+
+                AnimatedVisibility(
+                    visible = playerUiState.showDismissUndoBar,
+                    enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
+                    exit = slideOutVertically(targetOffsetY = { -it }) + fadeOut(),
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = innerPadding.calculateBottomPadding() + MiniPlayerBottomSpacer)
+                        .padding(horizontal = horizontalPadding)
+                ) {
+                    DismissUndoBar(
+                        modifier = Modifier
+                            .fillMaxWidth()
+//                            .background(
+//                                color = MaterialTheme.colorScheme.surfaceContainerHigh,
+//                                shape = CircleShape
+//                            )
+                            .height(MiniPlayerHeight)
+                            .padding(horizontal = 14.dp),
+                        onUndo = { playerViewModel.undoDismissPlaylist() },
+                        onClose = { playerViewModel.hideDismissUndoBar() },
+                        durationMillis = playerUiState.undoBarVisibleDuration
+                    )
+                }
             }
         }
         Trace.endSection()
@@ -490,7 +539,7 @@ class MainActivity : ComponentActivity() {
                 CircularProgressIndicator()
                 Spacer(modifier = Modifier.height(16.dp))
                 Text(
-                    text = "Preparando tu biblioteca...",
+                    text = "Preparing your library...",
                     style = MaterialTheme.typography.titleMedium,
                     color = MaterialTheme.colorScheme.onBackground
                 )
@@ -508,20 +557,20 @@ class MainActivity : ComponentActivity() {
             verticalArrangement = Arrangement.Center
         ) {
             Text(
-                text = "Permiso Requerido",
+                text = "Permission Required",
                 style = MaterialTheme.typography.headlineSmall,
                 color = MaterialTheme.colorScheme.onBackground
             )
             Spacer(modifier = Modifier.height(8.dp))
             Text(
-                text = "PixelPlay necesita acceso a tus archivos de audio para poder escanear y reproducir tu música. Por favor, concede el permiso para continuar.",
+                text = "PixelPlay needs access to your audio files to scan and play your music. Please grant permission to continue.",
                 style = MaterialTheme.typography.bodyLarge,
                 textAlign = TextAlign.Center,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             Spacer(modifier = Modifier.height(24.dp))
             Button(onClick = onRequestPermissions) {
-                Text("Conceder Permiso")
+                Text("Grant Permission")
             }
         }
     }

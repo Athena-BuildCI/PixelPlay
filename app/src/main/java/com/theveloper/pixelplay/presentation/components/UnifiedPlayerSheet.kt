@@ -97,7 +97,9 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import com.theveloper.pixelplay.presentation.viewmodel.PlayerViewModel
 // Coil imports for FullPlayerContentInternal
 
@@ -127,8 +129,11 @@ import kotlin.coroutines.cancellation.CancellationException
 import kotlin.math.abs
 import kotlin.math.pow
 import kotlin.math.roundToLong
+import kotlin.math.sign
 
 private val LocalMaterialTheme = staticCompositionLocalOf<ColorScheme> { error("No ColorScheme provided") }
+
+private enum class DragPhase { IDLE, TENSION, SNAPPING, FREE_DRAG }
 
 val MiniPlayerHeight = 64.dp
 val PlayerSheetExpandedCornerRadius = 32.dp
@@ -143,7 +148,8 @@ fun UnifiedPlayerSheet(
     sheetCollapsedTargetY: Float,
     containerHeight: Dp,
     collapsedStateHorizontalPadding: Dp = 12.dp,
-    hideMiniPlayer: Boolean = false
+    hideMiniPlayer: Boolean = false,
+    isNavBarHidden: Boolean = false
 ) {
     Trace.beginSection("UnifiedPlayerSheet.Composition")
     val context = LocalContext.current
@@ -196,15 +202,15 @@ fun UnifiedPlayerSheet(
     val configuration = LocalConfiguration.current
     val scope = rememberCoroutineScope()
 
-    var horizontalDragOffset by remember { mutableFloatStateOf(0f) }
+    val offsetAnimatable = remember { Animatable(0f) }
 
     val screenWidthPx = remember(configuration, density) { with(density) { configuration.screenWidthDp.dp.toPx() } }
     val dismissThresholdPx = remember(screenWidthPx) { screenWidthPx * 0.4f }
 
-    val swipeDismissProgress = remember(horizontalDragOffset, dismissThresholdPx) {
+    val swipeDismissProgress = remember(offsetAnimatable.value, dismissThresholdPx) {
         derivedStateOf {
             if (dismissThresholdPx == 0f) 0f
-            else (abs(horizontalDragOffset) / dismissThresholdPx).coerceIn(0f, 1f)
+            else (abs(offsetAnimatable.value) / dismissThresholdPx).coerceIn(0f, 1f)
         }
     }
 
@@ -392,12 +398,15 @@ fun UnifiedPlayerSheet(
         predictiveBackCollapseProgress,
         currentSheetContentState,
         navBarStyle,
-        navBarCornerRadius
+        navBarCornerRadius,
+        isNavBarHidden
     ) {
         derivedStateOf {
             if (showPlayerContentArea) {
                 val collapsedCornerTarget = if (navBarStyle == NavBarStyle.FULL_WIDTH) {
                     32.dp
+                } else if (isNavBarHidden) {
+                    60.dp
                 } else {
                     navBarCornerRadius.dp
                 }
@@ -413,6 +422,8 @@ fun UnifiedPlayerSheet(
             } else {
                 if (navBarStyle == NavBarStyle.FULL_WIDTH) {
                     0.dp
+                } else if (isNavBarHidden) {
+                    60.dp
                 } else {
                     navBarCornerRadius.dp
                 }
@@ -444,7 +455,9 @@ fun UnifiedPlayerSheet(
         stablePlayerState.currentSong,
         predictiveBackCollapseProgress,
         currentSheetContentState,
-        swipeDismissProgress.value
+        swipeDismissProgress.value,
+        isNavBarHidden,
+        navBarCornerRadius
     ) {
         derivedStateOf {
             if (navBarStyle == NavBarStyle.FULL_WIDTH) {
@@ -454,21 +467,22 @@ fun UnifiedPlayerSheet(
 
             val calculatedNormally = if (predictiveBackCollapseProgress > 0f && showPlayerContentArea && currentSheetContentState == PlayerSheetState.EXPANDED) {
                 val expandedRadius = 26.dp
-                val collapsedRadiusTarget = 12.dp
+                val collapsedRadiusTarget = if (isNavBarHidden) 60.dp else 12.dp
                 lerp(expandedRadius, collapsedRadiusTarget, predictiveBackCollapseProgress)
             } else {
                 if (showPlayerContentArea) {
                     val fraction = playerContentExpansionFraction.value
+                    val collapsedRadius = if (isNavBarHidden) 60.dp else 12.dp
                     if (fraction < 0.2f) {
-                        lerp(12.dp, 26.dp, (fraction / 0.2f).coerceIn(0f, 1f))
+                        lerp(collapsedRadius, 26.dp, (fraction / 0.2f).coerceIn(0f, 1f))
                     } else {
                         26.dp
                     }
                 } else {
                     if (!stablePlayerState.isPlaying || stablePlayerState.currentSong == null) {
-                        navBarCornerRadius.dp
+                        if (isNavBarHidden) 32.dp else navBarCornerRadius.dp
                     } else {
-                        12.dp
+                        if (isNavBarHidden) 32.dp else 12.dp
                     }
                 }
             }
@@ -478,7 +492,7 @@ fun UnifiedPlayerSheet(
                 showPlayerContentArea &&
                 playerContentExpansionFraction.value < 0.01f
             ) {
-                val baseCollapsedRadius = 12.dp
+                val baseCollapsedRadius = if (isNavBarHidden) 32.dp else 12.dp
                 lerp(baseCollapsedRadius, navBarCornerRadius.dp, swipeDismissProgress.value)
             } else {
                 calculatedNormally
@@ -573,6 +587,8 @@ fun UnifiedPlayerSheet(
     var isDraggingPlayerArea by remember { mutableStateOf(false) }
     val velocityTracker = remember { VelocityTracker() }
     var accumulatedDragYSinceStart by remember { mutableFloatStateOf(0f) }
+
+    val hapticFeedback = LocalHapticFeedback.current
 
     PredictiveBackHandler(
         enabled = showPlayerContentArea && currentSheetContentState == PlayerSheetState.EXPANDED && !isDragging
@@ -731,67 +747,93 @@ fun UnifiedPlayerSheet(
                     .padding(bottom = currentBottomPadding.value.dp)
             ) {
             // Use granular showDismissUndoBar and undoBarVisibleDuration
-            if (showDismissUndoBar) {
-                    AnimatedVisibility(
-                        visible = true,
-                        enter = slideInVertically(initialOffsetY = { it / 2 }) + fadeIn(),
-                        exit = slideOutVertically(targetOffsetY = { it / 2 }) + fadeOut(),
-                        modifier = Modifier
-                            .padding(horizontal = currentHorizontalPadding)
-                            .height(MiniPlayerHeight)
-                    ) {
-                        DismissUndoBar(
-                            onUndo = {
-                                playerViewModel.undoDismissPlaylist()
-                            },
-                        durationMillis = undoBarVisibleDuration, // Use granular state
-                            modifier = Modifier.height(MiniPlayerHeight)
-                        )
-                    }
-                } else if (showPlayerContentArea) {
+            if (showPlayerContentArea) {
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
                             .pointerInput(playerViewModel, showPlayerContentArea, currentSheetContentState, configuration, density, scope) {
                                 if (!showPlayerContentArea || currentSheetContentState != PlayerSheetState.COLLAPSED) {
-                                    if (horizontalDragOffset != 0f) horizontalDragOffset = 0f
+                                    scope.launch { offsetAnimatable.snapTo(0f) }
                                     return@pointerInput
                                 }
-                                var accumulatedDragX = 0f
+                                var accumulatedDragX by mutableFloatStateOf(0f)
+                                var dragPhase by mutableStateOf(DragPhase.IDLE)
+
                                 detectHorizontalDragGestures(
                                     onDragStart = {
+                                        dragPhase = DragPhase.TENSION
                                         accumulatedDragX = 0f
+                                        scope.launch { offsetAnimatable.stop() }
                                     },
                                     onHorizontalDrag = { change, dragAmount ->
                                         change.consume()
                                         accumulatedDragX += dragAmount
-                                        horizontalDragOffset += dragAmount
+
+                                        when (dragPhase) {
+                                            DragPhase.TENSION -> {
+                                                val snapThresholdPx = with(density) { 100.dp.toPx() }
+                                                if (abs(accumulatedDragX) < snapThresholdPx) {
+                                                    val maxTensionOffsetPx = with(density) { 30.dp.toPx() }
+                                                    val dragFraction = (abs(accumulatedDragX) / snapThresholdPx).coerceIn(0f, 1f)
+                                                    val tensionOffset = lerp(0f, maxTensionOffsetPx, dragFraction)
+                                                    scope.launch { offsetAnimatable.snapTo(tensionOffset * accumulatedDragX.sign) }
+                                                } else {
+                                                    // Threshold crossed, transition to the snap phase
+                                                    dragPhase = DragPhase.SNAPPING
+                                                }
+                                            }
+                                            DragPhase.SNAPPING -> {
+                                                hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
+                                                // On the first frame of snapping, launch the soft spring animation
+                                                scope.launch {
+                                                    offsetAnimatable.animateTo(
+                                                        targetValue = accumulatedDragX,
+                                                        animationSpec = spring(
+                                                            dampingRatio = 0.8f,
+                                                            stiffness = Spring.StiffnessLow
+                                                        )
+                                                    )
+                                                }
+                                                // Immediately transition to free drag so subsequent events are handled there
+                                                dragPhase = DragPhase.FREE_DRAG
+                                            }
+                                            DragPhase.FREE_DRAG -> {
+                                                // After the initial snap, track the finger with a very stiff spring to feel 1-to-1
+                                                scope.launch {
+                                                    offsetAnimatable.animateTo(
+                                                        targetValue = accumulatedDragX,
+                                                        animationSpec = spring(
+                                                            dampingRatio = Spring.DampingRatioNoBouncy,
+                                                            stiffness = Spring.StiffnessHigh
+                                                        )
+                                                    )
+                                                }
+                                            }
+                                            else -> {}
+                                        }
                                     },
                                     onDragEnd = {
-                                        val screenWidthPx = with(density) { configuration.screenWidthDp.dp.toPx() }
+                                        dragPhase = DragPhase.IDLE
                                         val dismissThreshold = screenWidthPx * 0.4f
-                                        val currentVisualOffset = horizontalDragOffset
                                         if (abs(accumulatedDragX) > dismissThreshold) {
                                             val targetDismissOffset = if (accumulatedDragX < 0) -screenWidthPx else screenWidthPx
                                             scope.launch {
-                                                Animatable(currentVisualOffset).animateTo(
+                                                offsetAnimatable.animateTo(
                                                     targetValue = targetDismissOffset,
                                                     animationSpec = tween(durationMillis = 200, easing = FastOutSlowInEasing)
-                                                ) { horizontalDragOffset = value }
+                                                )
                                                 playerViewModel.dismissPlaylistAndShowUndo()
-                                                horizontalDragOffset = 0f
-                                                accumulatedDragX = 0f
+                                                offsetAnimatable.snapTo(0f)
                                             }
                                         } else {
                                             scope.launch {
-                                                Animatable(currentVisualOffset).animateTo(
+                                                offsetAnimatable.animateTo(
                                                     targetValue = 0f,
                                                     animationSpec = spring(
-                                                        dampingRatio = Spring.DampingRatioNoBouncy,
+                                                        dampingRatio = Spring.DampingRatioMediumBouncy,
                                                         stiffness = Spring.StiffnessMedium
                                                     )
-                                                ) { horizontalDragOffset = value }
-                                                accumulatedDragX = 0f
+                                                )
                                             }
                                         }
                                     }
@@ -800,7 +842,7 @@ fun UnifiedPlayerSheet(
                             .padding(horizontal = currentHorizontalPadding)
                             .height(playerContentAreaActualHeightDp)
                             .graphicsLayer {
-                                translationX = horizontalDragOffset
+                                translationX = offsetAnimatable.value
                                 scaleY = visualOvershootScaleY.value
                                 transformOrigin = TransformOrigin(0.5f, 1f)
                             }
@@ -1929,78 +1971,5 @@ fun ToggleSegmentButton(
             tint = if (active) activeContentColor else LocalMaterialTheme.current.primary,
             modifier = Modifier.size(24.dp)
         )
-    }
-}
-
-@OptIn(ExperimentalMaterial3ExpressiveApi::class)
-@Composable
-fun DismissUndoBar(
-    modifier: Modifier = Modifier,
-    onUndo: () -> Unit,
-    durationMillis: Long
-) {
-    var progress by remember { mutableFloatStateOf(1f) }
-
-    LaunchedEffect(Unit) {
-        val startTime = System.currentTimeMillis()
-        while (System.currentTimeMillis() < startTime + durationMillis && progress > 0f) {
-            progress = 1f - (System.currentTimeMillis() - startTime).toFloat() / durationMillis
-            delay(16)
-        }
-        progress = 0f
-    }
-
-    Surface(
-        modifier = modifier
-            .fillMaxWidth()
-            .height(MiniPlayerHeight),
-        shape = CircleShape,
-        color = MaterialTheme.colorScheme.surfaceContainerHigh,
-        shadowElevation = 4.dp
-    ) {
-        Box(modifier = Modifier.fillMaxSize()) {
-            Row(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(horizontal = 16.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Text(
-                    modifier = Modifier.padding(start = 10.dp),
-                    text = "Playlist Dismissed",
-                    style = MaterialTheme.typography.titleMediumEmphasized,
-                    color = MaterialTheme.colorScheme.onSurface
-                )
-                Button(
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
-                        contentColor = MaterialTheme.colorScheme.onSurface
-                    ),
-                    onClick = onUndo
-                ) {
-                    Text("Undo", color = MaterialTheme.colorScheme.primary)
-                }
-            }
-            Box(
-                modifier = Modifier
-                    .align(Alignment.BottomStart)
-                    .fillMaxWidth(fraction = progress.coerceIn(0f,1f))
-                    .fillMaxHeight()
-                    .background(
-                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.22f),
-                        shape = AbsoluteSmoothCornerShape(
-                            cornerRadiusTR = 12.dp,
-                            smoothnessAsPercentTL = 60,
-                            cornerRadiusTL = 12.dp,
-                            smoothnessAsPercentTR = 60,
-                            cornerRadiusBR = 12.dp,
-                            smoothnessAsPercentBL = 60,
-                            cornerRadiusBL = 12.dp,
-                            smoothnessAsPercentBR = 60
-                        )
-                    )
-            )
-        }
     }
 }
