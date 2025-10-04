@@ -59,6 +59,7 @@ import com.theveloper.pixelplay.ui.theme.GenreColors
 import com.theveloper.pixelplay.ui.theme.LightColorScheme
 import com.theveloper.pixelplay.ui.theme.extractSeedColor
 import com.theveloper.pixelplay.ui.theme.generateColorSchemeFromSeed
+import com.theveloper.pixelplay.utils.LyricsUtils
 import com.theveloper.pixelplay.utils.toHexString
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -432,6 +433,16 @@ class PlayerViewModel @Inject constructor(
         }
     }
 
+    fun shuffleFavoriteSongs() {
+        Log.d("ShuffleDebug", "shuffleFavoriteSongs called.")
+        mediaController?.shuffleModeEnabled = true
+        val favSongs = favoriteSongs.value
+        if (favSongs.isNotEmpty()) {
+            val shuffledList = favSongs.shuffled()
+            playSongs(shuffledList, shuffledList.first(), "Liked Songs (Shuffled)")
+        }
+    }
+
     private fun loadPersistedDailyMix() {
         viewModelScope.launch {
             // Combine the flow of persisted IDs with the flow of all songs
@@ -461,8 +472,9 @@ class PlayerViewModel @Inject constructor(
     }
 
     private var progressJob: Job? = null
+    private var transitionSchedulerJob: Job? = null
 
-    fun incrementSongScore(songId: String) {
+    private fun incrementSongScore(songId: String) {
         viewModelScope.launch(Dispatchers.IO) {
             dailyMixManager.incrementScore(songId)
         }
@@ -858,12 +870,34 @@ class PlayerViewModel @Inject constructor(
         queueName: String = "Current Context",
         isVoluntaryPlay: Boolean = true
     ) {
-        Log.d("ShuffleDebug", "showAndPlaySong called for '${song.title}' with queue: $queueName")
-        _playerUiState.update { it.copy(preparingSongId = song.id) }
-        if (isVoluntaryPlay) {
-            incrementSongScore(song.id)
+        mediaController?.let { controller ->
+            val currentQueue = _playerUiState.value.currentPlaybackQueue
+            val songIndexInQueue = currentQueue.indexOfFirst { it.id == song.id }
+
+            // If the song is already in the current playback queue, just seek to it.
+            // This avoids resetting the queue and preserves user modifications (reordering, etc.).
+            if (songIndexInQueue != -1) {
+                // Don't seek if it's already the current item, just ensure it plays.
+                if (controller.currentMediaItemIndex == songIndexInQueue) {
+                    if (!controller.isPlaying) controller.play()
+                } else {
+                    controller.seekTo(songIndexInQueue, 0L)
+                    controller.play() // Ensure playback starts after seeking
+                }
+                if (isVoluntaryPlay) {
+                    incrementSongScore(song.id)
+                }
+            } else {
+                // The song is not in the current queue, so treat it as a new playback context.
+                // This will reset the queue with the new contextSongs list.
+                Log.d("ShuffleDebug", "showAndPlaySong (new context) for '${song.title}' with queue: $queueName")
+                _playerUiState.update { it.copy(preparingSongId = song.id) }
+                if (isVoluntaryPlay) {
+                    incrementSongScore(song.id)
+                }
+                playSongs(contextSongs, song, queueName, null)
+            }
         }
-        playSongs(contextSongs, song, queueName, null)
         _predictiveBackCollapseFraction.value = 0f
     }
 
@@ -917,8 +951,11 @@ class PlayerViewModel @Inject constructor(
         mediaController?.let { controller ->
             val currentQueue = _playerUiState.value.currentPlaybackQueue
             val indexToRemove = currentQueue.indexOfFirst { it.id == songId }
+
             if (indexToRemove != -1) {
+                // Command the player to remove the item. This is the source of truth for playback.
                 controller.removeMediaItem(indexToRemove)
+
             }
         }
     }
@@ -927,7 +964,11 @@ class PlayerViewModel @Inject constructor(
         mediaController?.let { controller ->
             if (fromIndex >= 0 && fromIndex < controller.mediaItemCount &&
                 toIndex >= 0 && toIndex < controller.mediaItemCount) {
+
+                // Move the item in the MediaController's timeline.
+                // This is the source of truth for playback.
                 controller.moveMediaItem(fromIndex, toIndex)
+
             }
         }
     }
@@ -1026,51 +1067,58 @@ class PlayerViewModel @Inject constructor(
                 }
             }
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-                if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) {
-                    val activeEotSongId = EotStateHolder.eotTargetSongId.value
-                    val previousSongId = playerCtrl.run { if (previousMediaItemIndex != C.INDEX_UNSET) getMediaItemAt(previousMediaItemIndex).mediaId else null }
+                // Cancel any pending transition job to handle rapid swipes and prevent race conditions.
+                transitionSchedulerJob?.cancel()
+                transitionSchedulerJob = viewModelScope.launch {
+                    if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) {
+                        val activeEotSongId = EotStateHolder.eotTargetSongId.value
+                        val previousSongId = playerCtrl.run { if (previousMediaItemIndex != C.INDEX_UNSET) getMediaItemAt(previousMediaItemIndex).mediaId else null }
 
-                    if (_isEndOfTrackTimerActive.value && activeEotSongId != null && previousSongId != null && previousSongId == activeEotSongId) {
-                        playerCtrl.seekTo(0L)
-                        playerCtrl.pause()
+                        if (_isEndOfTrackTimerActive.value && activeEotSongId != null && previousSongId != null && previousSongId == activeEotSongId) {
+                            playerCtrl.seekTo(0L)
+                            playerCtrl.pause()
 
-                        val finishedSongTitle = _playerUiState.value.allSongs.find { it.id == previousSongId }?.title
-                            ?: "Track" // Fallback title
+                            val finishedSongTitle = _playerUiState.value.allSongs.find { it.id == previousSongId }?.title
+                                ?: "Track" // Fallback title
 
-                        viewModelScope.launch {
-                            _toastEvents.emit("Playback stopped: $finishedSongTitle finished (End of Track).")
-                        }
-                        cancelSleepTimer(suppressDefaultToast = true)
-                    }
-                }
-
-                // --- Update state for the new mediaItem ---
-                mediaItem?.mediaId?.let { songId ->
-                    val song = _playerUiState.value.currentPlaybackQueue.find { s -> s.id == songId }
-                        ?: _playerUiState.value.allSongs.find { s -> s.id == songId }
-
-                    _stablePlayerState.update {
-                        it.copy(
-                            currentSong = song,
-                            // Duration might be C.TIME_UNSET if not yet known, ensure it's non-negative
-                            totalDuration = playerCtrl.duration.coerceAtLeast(0L)
-                        )
-                    }
-                    // Reset position for the new song. If EOT handled, this is fine as player is paused.
-                    // If not EOT, this correctly sets starting position for the new track.
-                    _playerUiState.update { it.copy(currentPosition = 0L) }
-
-                    song?.let { currentSongValue ->
-                        viewModelScope.launch {
-                            currentSongValue.albumArtUriString?.toUri()?.let { uri ->
-                                extractAndGenerateColorScheme(uri)
+                            viewModelScope.launch {
+                                _toastEvents.emit("Playback stopped: $finishedSongTitle finished (End of Track).")
                             }
+                            cancelSleepTimer(suppressDefaultToast = true)
                         }
-
-                        loadLyricsForCurrentSong()
                     }
-                } ?: _stablePlayerState.update {
-                    it.copy(currentSong = null, isPlaying = false)
+
+                    // --- Update state for the new mediaItem ---
+                    mediaItem?.mediaId?.let { songId ->
+                        // Robustly find the song in the master list to ensure consistency.
+                        val song = _masterAllSongs.value.find { s -> s.id == songId }
+
+                        // Reset lyrics state for the new song
+                        resetLyricsSearchState()
+
+                        _stablePlayerState.update {
+                            it.copy(
+                                currentSong = song,
+                                // Duration might be C.TIME_UNSET if not yet known, ensure it's non-negative
+                                totalDuration = playerCtrl.duration.coerceAtLeast(0L)
+                            )
+                        }
+                        // Reset position for the new song. If EOT handled, this is fine as player is paused.
+                        // If not EOT, this correctly sets starting position for the new track.
+                        _playerUiState.update { it.copy(currentPosition = 0L) }
+
+                        song?.let { currentSongValue ->
+                            viewModelScope.launch {
+                                currentSongValue.albumArtUriString?.toUri()?.let { uri ->
+                                    extractAndGenerateColorScheme(uri)
+                                }
+                            }
+
+                            loadLyricsForCurrentSong()
+                        }
+                    } ?: _stablePlayerState.update {
+                        it.copy(currentSong = null, isPlaying = false)
+                    }
                 }
             }
 
@@ -1099,10 +1147,12 @@ class PlayerViewModel @Inject constructor(
             }
             override fun onRepeatModeChanged(repeatMode: Int) { _stablePlayerState.update { it.copy(repeatMode = repeatMode) } }
             override fun onTimelineChanged(timeline: androidx.media3.common.Timeline, reason: Int) {
-                if (reason == Player.TIMELINE_CHANGE_REASON_PLAYLIST_CHANGED) {
-                    println("IN onTimelineChanged")
-                  //  updateCurrentPlaybackQueueFromPlayer(playerCtrl)
-                } // Pass playerCtrl}
+                // Cancel any pending song transition job. This is crucial to prevent a race condition
+                // where a transition update might use a stale queue, right before we update it here.
+                // This ensures that when the queue is modified (reorder, remove), the UI state
+                // remains perfectly in sync with the player's new timeline.
+                transitionSchedulerJob?.cancel()
+                updateCurrentPlaybackQueueFromPlayer(mediaController)
             }
         })
         Trace.endSection()
@@ -1123,6 +1173,7 @@ class PlayerViewModel @Inject constructor(
 
     fun playSongs(songsToPlay: List<Song>, startSong: Song, queueName: String = "None", playlistId: String? = null) {
         viewModelScope.launch {
+            transitionSchedulerJob?.cancel()
             internalPlaySongs(songsToPlay, startSong, queueName, playlistId)
         }
     }
@@ -1538,7 +1589,7 @@ class PlayerViewModel @Inject constructor(
                 if (newPosition != _playerUiState.value.currentPosition) {
                     _playerUiState.update { it.copy(currentPosition = newPosition) }
                 }
-                delay(1000)
+                delay(40)
             }
         }
     }
@@ -2131,6 +2182,38 @@ class PlayerViewModel @Inject constructor(
                     .onFailure { error ->
                         _lyricsSearchUiState.value = LyricsSearchUiState.Error(error.message ?: "Unknown error")
                     }
+            }
+        }
+    }
+
+    /**
+     * Procesa la letra importada de un archivo, la guarda y actualiza la UI.
+     * @param songId El ID de la canción para la que se importa la letra.
+     * @param lyricsContent El contenido de la letra como String.
+     */
+    fun importLyricsFromFile(songId: Long, lyricsContent: String) {
+        viewModelScope.launch {
+            // 1. Guardar la nueva letra en la base de datos.
+            musicRepository.updateLyrics(songId, lyricsContent)
+
+            // 2. Volver a cargar la letra para la canción actual para actualizar la UI.
+            val currentSong = _stablePlayerState.value.currentSong
+            if (currentSong != null && currentSong.id.toLong() == songId) {
+                // Actualizar la instancia de la canción en el estado estable con la nueva letra.
+                val updatedSong = currentSong.copy(lyrics = lyricsContent)
+                val parsedLyrics = LyricsUtils.parseLyrics(lyricsContent)
+
+                _stablePlayerState.update {
+                    it.copy(
+                        currentSong = updatedSong,
+                        lyrics = parsedLyrics,
+                        isLoadingLyrics = false
+                    )
+                }
+                _lyricsSearchUiState.value = LyricsSearchUiState.Success(parsedLyrics)
+                _toastEvents.emit("Lyrics imported successfully!")
+            } else {
+                _lyricsSearchUiState.value = LyricsSearchUiState.Error("Could not associate lyrics with the current song.")
             }
         }
     }
