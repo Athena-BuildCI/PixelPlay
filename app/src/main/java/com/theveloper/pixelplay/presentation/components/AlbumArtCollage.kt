@@ -23,7 +23,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.theveloper.pixelplay.R
 import com.theveloper.pixelplay.data.model.Song
@@ -63,8 +62,8 @@ fun AlbumArtCollage(
                     .data(it)
                     .dispatcher(Dispatchers.IO)
                     .crossfade(true)
-                    //.placeholder(R.drawable.rounded_album_24)
-                    .error(R.drawable.rounded_album_24)
+                    //.placeholder(R.drawable.ic_music_placeholder)
+                    .error(R.drawable.ic_music_placeholder)
                     .build()
             }
         }.toImmutableList()
@@ -97,7 +96,7 @@ fun AlbumArtCollage(
                 Box(Modifier.fillMaxWidth().height(boxMaxHeight * 0.6f)) {
                     topConfigs.forEachIndexed { idx, cfg ->
                         songsToShow.getOrNull(idx)?.let { song ->
-                            AsyncImage(
+                            SmartImage(
                                 model = requests[idx],
                                 contentDescription = null,
                                 contentScale = ContentScale.Crop,
@@ -119,7 +118,7 @@ fun AlbumArtCollage(
                 Box(Modifier.fillMaxWidth().height(boxMaxHeight * 0.4f)) {
                     bottomConfigs.forEachIndexed { j, cfg ->
                         songsToShow.getOrNull(j + 3)?.let { song ->
-                            AsyncImage(
+                            SmartImage(
                                 model = requests[j + 3],
                                 contentDescription = null,
                                 contentScale = ContentScale.Crop,

@@ -1,3 +1,5 @@
+@file:OptIn(ExperimentalMaterial3ExpressiveApi::class)
+
 package com.theveloper.pixelplay.presentation.screens
 
 import androidx.activity.compose.BackHandler
@@ -5,7 +7,6 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,6 +16,7 @@ import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBars
@@ -26,11 +28,13 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.rounded.Shuffle
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ContainedLoadingIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButtonDefaults
-import androidx.compose.material3.LargeFloatingActionButton
+import androidx.compose.material3.LargeExtendedFloatingActionButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -56,11 +60,14 @@ import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextGeometricTransform
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.dp
+import com.theveloper.pixelplay.ui.theme.LocalPixelPlayDarkTheme
 import androidx.compose.ui.unit.lerp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.util.lerp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.media3.common.util.UnstableApi
@@ -68,24 +75,28 @@ import androidx.navigation.NavController
 import com.theveloper.pixelplay.R
 import com.theveloper.pixelplay.data.model.Album
 import com.theveloper.pixelplay.presentation.components.MiniPlayerHeight
+import com.theveloper.pixelplay.presentation.components.NavBarContentHeight
+import com.theveloper.pixelplay.presentation.components.PlaylistBottomSheet
 import com.theveloper.pixelplay.presentation.components.SmartImage
 import com.theveloper.pixelplay.presentation.components.SongInfoBottomSheet
 import com.theveloper.pixelplay.presentation.navigation.Screen
 import com.theveloper.pixelplay.presentation.viewmodel.AlbumDetailViewModel
 import com.theveloper.pixelplay.presentation.viewmodel.PlayerSheetState
 import com.theveloper.pixelplay.presentation.viewmodel.PlayerViewModel
+import com.theveloper.pixelplay.presentation.viewmodel.PlaylistViewModel
 import com.theveloper.pixelplay.utils.shapes.RoundedStarShape
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
 @androidx.annotation.OptIn(UnstableApi::class)
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun AlbumDetailScreen(
     albumId: String,
     navController: NavController,
     playerViewModel: PlayerViewModel,
-    viewModel: AlbumDetailViewModel = hiltViewModel()
+    viewModel: AlbumDetailViewModel = hiltViewModel(),
+    playlistViewModel: PlaylistViewModel = hiltViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val stablePlayerState by playerViewModel.stablePlayerState.collectAsState()
@@ -93,9 +104,14 @@ fun AlbumDetailScreen(
     val favoriteIds by playerViewModel.favoriteSongIds.collectAsState()
     var showSongInfoBottomSheet by remember { mutableStateOf(false) }
     val selectedSongForInfo by playerViewModel.selectedSongForInfo.collectAsState()
-
+    val systemNavBarInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+    val bottomBarHeightDp = NavBarContentHeight + systemNavBarInset
+    var showPlaylistBottomSheet by remember { mutableStateOf(false) }
     val surfaceColor = MaterialTheme.colorScheme.surface
-    val statusBarColor = if (isSystemInDarkTheme()) Color.Black.copy(alpha = 0.6f) else Color.White.copy(alpha = 0.4f)
+    val statusBarColor =
+        if (LocalPixelPlayDarkTheme.current) Color.Black.copy(alpha = 0.6f) else Color.White.copy(
+            alpha = 0.4f
+        )
     val density = LocalDensity.current
     val coroutineScope = rememberCoroutineScope()
 
@@ -106,9 +122,10 @@ fun AlbumDetailScreen(
     when {
         uiState.isLoading && uiState.album == null -> {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator()
+            ContainedLoadingIndicator()
             }
         }
+
         uiState.error != null && uiState.album == null -> {
             Box(
                 modifier = Modifier
@@ -123,6 +140,7 @@ fun AlbumDetailScreen(
                 )
             }
         }
+
         uiState.album != null -> {
             val album = uiState.album!!
             val songs = uiState.songs
@@ -139,12 +157,19 @@ fun AlbumDetailScreen(
             var collapseFraction by remember { mutableFloatStateOf(0f) }
 
             LaunchedEffect(topBarHeight.value) {
-                collapseFraction = 1f - ((topBarHeight.value - minTopBarHeightPx) / (maxTopBarHeightPx - minTopBarHeightPx)).coerceIn(0f, 1f)
+                collapseFraction =
+                    1f - ((topBarHeight.value - minTopBarHeightPx) / (maxTopBarHeightPx - minTopBarHeightPx)).coerceIn(
+                        0f,
+                        1f
+                    )
             }
 
             val nestedScrollConnection = remember {
                 object : NestedScrollConnection {
-                    override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                    override fun onPreScroll(
+                        available: Offset,
+                        source: NestedScrollSource
+                    ): Offset {
                         val delta = available.y
                         val isScrollingDown = delta < 0
 
@@ -153,7 +178,8 @@ fun AlbumDetailScreen(
                         }
 
                         val previousHeight = topBarHeight.value
-                        val newHeight = (previousHeight + delta).coerceIn(minTopBarHeightPx, maxTopBarHeightPx)
+                        val newHeight =
+                            (previousHeight + delta).coerceIn(minTopBarHeightPx, maxTopBarHeightPx)
                         val consumed = newHeight - previousHeight
 
                         if (consumed.roundToInt() != 0) {
@@ -166,7 +192,10 @@ fun AlbumDetailScreen(
                         return if (canConsumeScroll) Offset(0f, consumed) else Offset.Zero
                     }
 
-                    override suspend fun onPostFling(consumed: Velocity, available: Velocity): Velocity {
+                    override suspend fun onPostFling(
+                        consumed: Velocity,
+                        available: Velocity
+                    ): Velocity {
                         return super.onPostFling(consumed, available)
                     }
                 }
@@ -174,8 +203,10 @@ fun AlbumDetailScreen(
 
             LaunchedEffect(lazyListState.isScrollInProgress) {
                 if (!lazyListState.isScrollInProgress) {
-                    val shouldExpand = topBarHeight.value > (minTopBarHeightPx + maxTopBarHeightPx) / 2
-                    val canExpand = lazyListState.firstVisibleItemIndex == 0 && lazyListState.firstVisibleItemScrollOffset == 0
+                    val shouldExpand =
+                        topBarHeight.value > (minTopBarHeightPx + maxTopBarHeightPx) / 2
+                    val canExpand =
+                        lazyListState.firstVisibleItemIndex == 0 && lazyListState.firstVisibleItemScrollOffset == 0
 
                     val targetValue = if (shouldExpand && canExpand) {
                         maxTopBarHeightPx
@@ -185,17 +216,25 @@ fun AlbumDetailScreen(
 
                     if (topBarHeight.value != targetValue) {
                         coroutineScope.launch {
-                            topBarHeight.animateTo(targetValue, spring(stiffness = Spring.StiffnessMedium))
+                            topBarHeight.animateTo(
+                                targetValue,
+                                spring(stiffness = Spring.StiffnessMedium)
+                            )
                         }
                     }
                 }
             }
 
-            Box(modifier = Modifier.nestedScroll(nestedScrollConnection).fillMaxSize()) {
+            Box(modifier = Modifier
+                .nestedScroll(nestedScrollConnection)
+                .fillMaxSize()) {
                 val currentTopBarHeightDp = with(density) { topBarHeight.value.toDp() }
                 LazyColumn(
                     state = lazyListState,
-                    contentPadding = PaddingValues(top = currentTopBarHeightDp, bottom = MiniPlayerHeight + 28.dp),
+                    contentPadding = PaddingValues(
+                        top = currentTopBarHeightDp,
+                        bottom = MiniPlayerHeight + WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + 8.dp
+                    ),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                     modifier = Modifier
                         .fillMaxSize()
@@ -204,7 +243,7 @@ fun AlbumDetailScreen(
                     items(songs, key = { song -> "album_song_${song.id}" }) { song ->
                         EnhancedSongListItem(
                             song = song,
-                            isCurrentSong = songs.isNotEmpty() && stablePlayerState.currentSong == song,
+                            isCurrentSong = stablePlayerState.currentSong?.id == song.id,
                             isPlaying = stablePlayerState.isPlaying,
                             onMoreOptionsClick = {
                                 playerViewModel.selectSongForInfo(song)
@@ -237,6 +276,11 @@ fun AlbumDetailScreen(
         }.value ?: false
 
         if (currentSong != null) {
+            val removeFromListTrigger = remember(uiState.songs) {
+                {
+                    viewModel.update(uiState.songs.filterNot { it.id == currentSong.id })
+                }
+            }
             SongInfoBottomSheet(
                 song = currentSong,
                 isFavorite = isFavorite,
@@ -252,6 +296,14 @@ fun AlbumDetailScreen(
                     playerViewModel.addSongToQueue(currentSong)
                     showSongInfoBottomSheet = false
                 },
+                onAddNextToQueue = {
+                    playerViewModel.addSongNextToQueue(currentSong)
+                    showSongInfoBottomSheet = false
+                },
+                onAddToPlayList = {
+                    showPlaylistBottomSheet = true;
+                },
+                onDeleteFromDevice = playerViewModel::deleteFromDevice,
                 onNavigateToAlbum = {
                     navController.navigate(Screen.AlbumDetail.createRoute(currentSong.albumId))
                     showSongInfoBottomSheet = false
@@ -260,13 +312,34 @@ fun AlbumDetailScreen(
                     navController.navigate(Screen.ArtistDetail.createRoute(currentSong.artistId))
                     showSongInfoBottomSheet = false
                 },
-                onEditSong = { newTitle, newArtist, newAlbum, newGenre, newLyrics, newTrackNumber ->
-                    playerViewModel.editSongMetadata(currentSong, newTitle, newArtist, newAlbum, newGenre, newLyrics, newTrackNumber)
+                onEditSong = { newTitle, newArtist, newAlbum, newGenre, newLyrics, newTrackNumber, coverArtUpdate ->
+                    playerViewModel.editSongMetadata(
+                        currentSong,
+                        newTitle,
+                        newArtist,
+                        newAlbum,
+                        newGenre,
+                        newLyrics,
+                        newTrackNumber,
+                        coverArtUpdate
+                    )
                 },
                 generateAiMetadata = { fields ->
                     playerViewModel.generateAiMetadata(currentSong, fields)
-                }
+                },
+                removeFromListTrigger = removeFromListTrigger
             )
+            if (showPlaylistBottomSheet) {
+                val playlistUiState by playlistViewModel.uiState.collectAsState()
+
+                PlaylistBottomSheet(
+                    playlistUiState = playlistUiState,
+                    song = currentSong,
+                    onDismiss = { showPlaylistBottomSheet = false },
+                    bottomBarHeight = bottomBarHeightDp,
+                    playerViewModel = playerViewModel
+                )
+            }
         }
     }
 }
@@ -282,7 +355,10 @@ private fun CollapsingAlbumTopBar(
     onPlayClick: () -> Unit
 ) {
     val surfaceColor = MaterialTheme.colorScheme.surface
-    val statusBarColor = if (isSystemInDarkTheme()) Color.Black.copy(alpha = 0.6f) else Color.White.copy(alpha = 0.4f)
+    val statusBarColor =
+        if (LocalPixelPlayDarkTheme.current) Color.Black.copy(alpha = 0.6f) else Color.White.copy(
+            alpha = 0.4f
+        )
 
     // Animation Values
     val fabScale = 1f - collapseFraction
@@ -294,7 +370,8 @@ private fun CollapsingAlbumTopBar(
     val titlePaddingStart = lerp(24.dp, 58.dp, collapseFraction)
     val titleMaxLines = if (collapseFraction < 0.5f) 2 else 1
     val titleVerticalBias = lerp(1f, -1f, collapseFraction)
-    val animatedTitleAlignment = BiasAlignment(horizontalBias = -1f, verticalBias = titleVerticalBias)
+    val animatedTitleAlignment =
+        BiasAlignment(horizontalBias = -1f, verticalBias = titleVerticalBias)
     val titleContainerHeight = lerp(88.dp, 56.dp, collapseFraction)
     val yOffsetCorrection = lerp((titleContainerHeight / 2) - 64.dp, 0.dp, collapseFraction)
 
@@ -311,7 +388,7 @@ private fun CollapsingAlbumTopBar(
                 .graphicsLayer { alpha = headerContentAlpha }
         ) {
             SmartImage(
-                model = album.albumArtUriString ?: R.drawable.rounded_album_24,
+                model = album.albumArtUriString,
                 contentDescription = "Cover of ${album.title}",
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize()
@@ -335,7 +412,14 @@ private fun CollapsingAlbumTopBar(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(80.dp)
-                .background(Brush.verticalGradient(colors = listOf(statusBarColor, Color.Transparent)))
+                .background(
+                    Brush.verticalGradient(
+                        colors = listOf(
+                            statusBarColor,
+                            Color.Transparent
+                        )
+                    )
+                )
                 .align(Alignment.TopCenter)
         )
 
@@ -346,7 +430,9 @@ private fun CollapsingAlbumTopBar(
                 .statusBarsPadding()
         ) {
             FilledIconButton(
-                modifier = Modifier.align(Alignment.TopStart).padding(start = 12.dp, top = 4.dp),
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(start = 12.dp, top = 4.dp),
                 onClick = onBackPressed,
                 colors = IconButtonDefaults.filledIconButtonColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)
             ) {
@@ -372,7 +458,10 @@ private fun CollapsingAlbumTopBar(
                 ) {
                     Text(
                         text = album.title,
-                        style = MaterialTheme.typography.headlineMedium,
+                        style = MaterialTheme.typography.headlineMedium.copy(
+                            fontSize = 26.sp,
+                            textGeometricTransform = TextGeometricTransform(scaleX = 1.2f),
+                        ),
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onSurface,
                         maxLines = titleMaxLines,
@@ -388,7 +477,7 @@ private fun CollapsingAlbumTopBar(
                 }
             }
 
-            LargeFloatingActionButton(
+            LargeExtendedFloatingActionButton(
                 onClick = onPlayClick,
                 shape = RoundedStarShape(sides = 8, curve = 0.05, rotation = 0f),
                 modifier = Modifier

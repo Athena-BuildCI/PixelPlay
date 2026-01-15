@@ -38,8 +38,11 @@ class AiMetadataGenerator @Inject constructor(
                 return Result.failure(Exception("API Key not configured."))
             }
 
+            val selectedModel = userPreferencesRepository.geminiModel.first()
+            val modelName = selectedModel.ifEmpty { "" }
+
             val generativeModel = GenerativeModel(
-                modelName = "gemini-2.5-flash",
+                modelName = modelName,
                 apiKey = apiKey
             )
 
@@ -66,7 +69,7 @@ class AiMetadataGenerator @Inject constructor(
             $systemPrompt
 
             Song title: "${song.title}"
-            Song artist: "${song.artist}"
+            Song artist: "${song.displayArtist}"
             $albumInfo
             Fields to complete: [$fieldsJson]
             """.trimIndent()

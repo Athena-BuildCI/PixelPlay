@@ -5,6 +5,7 @@ import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
 import com.theveloper.pixelplay.data.model.Album
+import com.theveloper.pixelplay.utils.normalizeMetadataTextOrEmpty
 
 @Entity(
     tableName = "albums",
@@ -20,16 +21,18 @@ data class AlbumEntity(
     @ColumnInfo(name = "artist_name") val artistName: String, // Nombre del artista del álbum
     @ColumnInfo(name = "artist_id") val artistId: Long, // ID del artista principal del álbum (si aplica)
     @ColumnInfo(name = "album_art_uri_string") val albumArtUriString: String?,
-    @ColumnInfo(name = "song_count") val songCount: Int
+    @ColumnInfo(name = "song_count") val songCount: Int,
+    @ColumnInfo(name = "year") val year: Int
 )
 
 fun AlbumEntity.toAlbum(): Album {
     return Album(
         id = this.id,
-        title = this.title,
-        artist = this.artistName,
+        title = this.title.normalizeMetadataTextOrEmpty(),
+        artist = this.artistName.normalizeMetadataTextOrEmpty(),
         albumArtUriString = this.albumArtUriString, // El modelo Album usa albumArtUrl
-        songCount = this.songCount
+        songCount = this.songCount,
+        year = this.year
     )
 }
 
@@ -44,6 +47,7 @@ fun Album.toEntity(artistIdForAlbum: Long): AlbumEntity { // Necesitamos pasar e
         artistName = this.artist,
         artistId = artistIdForAlbum, // Asignar el ID del artista
         albumArtUriString = this.albumArtUriString,
-        songCount = this.songCount
+        songCount = this.songCount,
+        year = this.year
     )
 }

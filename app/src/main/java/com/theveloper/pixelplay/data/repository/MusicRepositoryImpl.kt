@@ -7,6 +7,7 @@ import android.database.Cursor
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.provider.MediaStore
 import android.util.Log
 import com.theveloper.pixelplay.data.model.Song
@@ -29,17 +30,26 @@ import com.theveloper.pixelplay.data.model.Playlist
 import com.theveloper.pixelplay.data.model.SearchFilterType
 import com.theveloper.pixelplay.data.model.SearchHistoryItem
 import com.theveloper.pixelplay.data.model.SearchResultItem
+import com.theveloper.pixelplay.data.model.SortOption
 import com.theveloper.pixelplay.data.preferences.UserPreferencesRepository
+import androidx.sqlite.db.SimpleSQLiteQuery
 
 import com.theveloper.pixelplay.data.model.Genre
 import com.theveloper.pixelplay.data.database.SongEntity
+import com.theveloper.pixelplay.data.database.SongArtistCrossRef
+import com.theveloper.pixelplay.data.database.ArtistEntity
 import com.theveloper.pixelplay.data.database.toAlbum
 import com.theveloper.pixelplay.data.database.toArtist
 import com.theveloper.pixelplay.data.database.toSong
+import com.theveloper.pixelplay.data.database.toSongWithArtistRefs
 import com.theveloper.pixelplay.data.model.Lyrics
 import com.theveloper.pixelplay.data.model.SyncedLine
 import com.theveloper.pixelplay.utils.LogUtils
+import com.theveloper.pixelplay.data.model.MusicFolder
 import com.theveloper.pixelplay.utils.LyricsUtils
+import com.theveloper.pixelplay.utils.DirectoryRuleResolver
+import kotlinx.coroutines.flow.conflate
+import kotlinx.collections.immutable.toImmutableList
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first // Still needed for initialSetupDoneFlow.first() if used that way
@@ -66,72 +76,134 @@ class MusicRepositoryImpl @Inject constructor(
 
     private val directoryScanMutex = Mutex()
 
+    private data class DirectoryFilterConfig(
+        val normalizedAllowed: Set<String>,
+        val normalizedBlocked: Set<String>,
+        val initialSetupDone: Boolean,
+    ) {
+        val isFilterActive: Boolean get() = normalizedBlocked.isNotEmpty()
+    }
+
+    private val directoryFilterConfig: Flow<DirectoryFilterConfig> = combine(
+        userPreferencesRepository.allowedDirectoriesFlow,
+        userPreferencesRepository.blockedDirectoriesFlow,
+        userPreferencesRepository.initialSetupDoneFlow
+    ) { allowed, blocked, initialSetupDone ->
+        DirectoryFilterConfig(
+            normalizedAllowed = allowed.map(::normalizePath).toSet(),
+            normalizedBlocked = blocked.map(::normalizePath).toSet(),
+            initialSetupDone = initialSetupDone,
+        )
+    }
+
+    private val allSongsFlow: Flow<List<SongEntity>> = musicDao.getSongs(
+        allowedParentDirs = emptyList(),
+        applyDirectoryFilter = false
+    )
+
+    private val permittedSongsFlow: Flow<List<SongEntity>> = combine(
+        allSongsFlow,
+        directoryFilterConfig
+    ) { songs, config ->
+        songs.filterBlocked(config)
+    }.conflate()
+
+    private val allArtistsFlow = musicDao.getAllArtistsRaw()
+
+    private val allCrossRefsFlow = musicDao.getAllSongArtistCrossRefs()
+
+    private fun normalizePath(path: String): String =
+        runCatching { File(path).canonicalPath }.getOrElse { File(path).absolutePath }
+
+    private fun List<SongEntity>.filterBlocked(config: DirectoryFilterConfig): List<SongEntity> {
+        if (!config.isFilterActive) return this
+
+        val resolver = DirectoryRuleResolver(config.normalizedAllowed, config.normalizedBlocked)
+
+        return filter { song ->
+            val normalizedParent = normalizePath(song.parentDirectoryPath)
+            !resolver.isBlocked(normalizedParent)
+        }
+    }
+
+    private fun List<SongArtistCrossRef>.filterBySongs(songIds: Set<Long>): List<SongArtistCrossRef> {
+        if (songIds.isEmpty()) return emptyList()
+        return filter { songIds.contains(it.songId) }
+    }
+
+    private fun mapSongList(
+        songs: List<SongEntity>,
+        config: DirectoryFilterConfig?,
+        artists: List<ArtistEntity>,
+        crossRefs: List<SongArtistCrossRef>
+    ): List<Song> {
+        val allowedSongs = config?.let { songs.filterBlocked(it) } ?: songs
+        if (allowedSongs.isEmpty()) return emptyList()
+
+        val allowedSongIds = allowedSongs.map { it.id }.toSet()
+        val filteredCrossRefs = crossRefs.filterBySongs(allowedSongIds)
+        val artistIds = filteredCrossRefs.map { it.artistId }.toSet()
+        val artistMap = artists.filter { artistIds.contains(it.id) }.associateBy { it.id }
+        val crossRefsBySong = filteredCrossRefs.groupBy { it.songId }
+
+        return allowedSongs.map { song ->
+            val songCrossRefs = crossRefsBySong[song.id].orEmpty()
+            val songArtists = songCrossRefs.mapNotNull { artistMap[it.artistId] }
+            song.toSongWithArtistRefs(songArtists, songCrossRefs)
+        }
+    }
+
+    private fun mapSingleSong(
+        song: SongEntity?,
+        config: DirectoryFilterConfig?,
+        artists: List<ArtistEntity>,
+        crossRefs: List<SongArtistCrossRef>
+    ): Song? {
+        if (song == null) return null
+        return mapSongList(listOf(song), config, artists, crossRefs).firstOrNull()
+    }
+
+    private suspend fun permittedSongsOnce(): Pair<List<SongEntity>, DirectoryFilterConfig> {
+        val config = directoryFilterConfig.first()
+        val songs = musicDao.getAllSongsList().filterBlocked(config)
+        return songs to config
+    }
+
     @OptIn(ExperimentalCoroutinesApi::class)
     override fun getAudioFiles(): Flow<List<Song>> {
         LogUtils.d(this, "getAudioFiles")
         return combine(
-            userPreferencesRepository.allowedDirectoriesFlow,
-            userPreferencesRepository.initialSetupDoneFlow
-        ) { allowedDirs, initialSetupDone ->
-            Pair(allowedDirs.toList(), initialSetupDone)
-        }.flatMapLatest { (allowedDirs, initialSetupDone) ->
-            if (initialSetupDone && allowedDirs.isEmpty()) {
-                flowOf(emptyList<Song>()) // No directories allowed, return empty list of Songs
-            } else {
-                musicDao.getSongs(
-                    allowedParentDirs = allowedDirs,
-                    applyDirectoryFilter = initialSetupDone // Only apply filter if setup is done
-                ).map { entities -> entities.map { it.toSong() } }
-            }
+            permittedSongsFlow,
+            allArtistsFlow,
+            allCrossRefsFlow
+        ) { songs, artists, crossRefs ->
+            mapSongList(songs, null, artists, crossRefs)
         }.flowOn(Dispatchers.IO)
     }
 
     override fun getAlbums(): Flow<List<Album>> {
         LogUtils.d(this, "getAlbums")
         return combine(
-            userPreferencesRepository.allowedDirectoriesFlow,
-            userPreferencesRepository.initialSetupDoneFlow
-        ) { allowedDirs, initialSetupDone ->
-            Pair(allowedDirs.toList(), initialSetupDone)
-        }.flatMapLatest { (allowedDirs, initialSetupDone) ->
-            if (initialSetupDone && allowedDirs.isEmpty()) {
-                flowOf(emptyList<Album>())
-            } else {
-                musicDao.getAlbums(
-                    allowedParentDirs = allowedDirs,
-                    applyDirectoryFilter = initialSetupDone
-                ).map { entities -> entities.map { it.toAlbum() } }
-            }
-        }.flowOn(Dispatchers.IO)
+            musicDao.getAlbums(allowedParentDirs = emptyList(), applyDirectoryFilter = false),
+            permittedSongsFlow,
+            directoryFilterConfig
+        ) { albums, allowedSongs, _ ->
+            val allowedAlbumIds = allowedSongs.map { it.albumId }.toSet()
+            albums.filter { allowedAlbumIds.contains(it.id) }
+                .map { it.toAlbum() }
+        }.conflate().flowOn(Dispatchers.IO)
     }
 
     @OptIn(ExperimentalCoroutinesApi::class)
     override fun getAlbumById(id: Long): Flow<Album?> {
         LogUtils.d(this, "getAlbumById: $id")
         return combine(
-            userPreferencesRepository.allowedDirectoriesFlow,
-            userPreferencesRepository.initialSetupDoneFlow
-        ) { allowedDirs, initialSetupDone ->
-            Pair(allowedDirs.toList(), initialSetupDone)
-        }.flatMapLatest { (allowedDirs, initialSetupDone) ->
-            // Check if album has any songs in allowed directories
-            musicDao.getSongsByAlbumId(id) // Assuming this DAO method exists or is added
-                .map { songEntities ->
-                    val permittedSongsInAlbum = songEntities.filter { songEntity ->
-                        if (!initialSetupDone) true // if setup not done, all songs are permitted for this check
-                        else allowedDirs.contains(songEntity.parentDirectoryPath)
-                    }
-                    if (initialSetupDone && allowedDirs.isEmpty() && songEntities.isNotEmpty()) {
-                        null // Setup done, no allowed dirs, so album effectively not accessible
-                    } else if (permittedSongsInAlbum.isNotEmpty() || !initialSetupDone) {
-                        // Album has permitted songs OR initial setup not done (show all)
-                        // Fetch the album details
-                        musicDao.getAlbumById(id).map { it?.toAlbum() }
-                    } else {
-                        flowOf(null) // No permitted songs for this album
-                    }
-                }.flatMapLatest { it!! } // Flatten the Flow<Flow<Album?>> to Flow<Album?>
-        }.flowOn(Dispatchers.IO)
+            musicDao.getAlbumById(id),
+            permittedSongsFlow
+        ) { albumEntity, allowedSongs ->
+            val hasAccess = albumEntity != null && allowedSongs.any { it.albumId == id }
+            if (hasAccess) albumEntity?.toAlbum() else null
+        }.conflate().flowOn(Dispatchers.IO)
         // Original simpler version (kept for reference, might be okay depending on requirements):
         // return musicDao.getAlbumById(id).map { it?.toAlbum() }.flowOn(Dispatchers.IO)
     }
@@ -139,78 +211,69 @@ class MusicRepositoryImpl @Inject constructor(
     override fun getArtists(): Flow<List<Artist>> {
         LogUtils.d(this, "getArtists")
         return combine(
-            userPreferencesRepository.allowedDirectoriesFlow,
-            userPreferencesRepository.initialSetupDoneFlow
-        ) { allowedDirs, initialSetupDone ->
-            Pair(allowedDirs.toList(), initialSetupDone)
-        }.flatMapLatest { (allowedDirs, initialSetupDone) ->
-            if (initialSetupDone && allowedDirs.isEmpty()) {
-                flowOf(emptyList<Artist>())
-            } else {
-                musicDao.getArtists(
-                    allowedParentDirs = allowedDirs,
-                    applyDirectoryFilter = initialSetupDone
-                ).map { entities -> entities.map { it.toArtist() } }
-            }
-        }.flowOn(Dispatchers.IO)
+            musicDao.getArtists(allowedParentDirs = emptyList(), applyDirectoryFilter = false),
+            permittedSongsFlow,
+            directoryFilterConfig,
+            allCrossRefsFlow
+        ) { artists, allowedSongs, _, crossRefs ->
+            val allowedSongIds = allowedSongs.map { it.id }.toSet()
+            val allowedCrossRefs = crossRefs.filterBySongs(allowedSongIds)
+            val allowedArtistIds = allowedCrossRefs.map { it.artistId }.toMutableSet()
+            // Fallback to primary artist ids in case cross-refs are empty for some reason
+            allowedArtistIds.addAll(allowedSongs.map { it.artistId })
+
+            artists.filter { allowedArtistIds.contains(it.id) }
+                .map { it.toArtist() }
+        }.conflate().flowOn(Dispatchers.IO)
     }
 
     // getSongsForAlbum and getSongsForArtist should also respect directory permissions
     override fun getSongsForAlbum(albumId: Long): Flow<List<Song>> {
         LogUtils.d(this, "getSongsForAlbum: $albumId")
         return combine(
-            userPreferencesRepository.allowedDirectoriesFlow,
-            userPreferencesRepository.initialSetupDoneFlow
-        ) { allowedDirs, initialSetupDone ->
-            Pair(allowedDirs.toList(), initialSetupDone)
-        }.flatMapLatest { (allowedDirs, initialSetupDone) ->
-            musicDao.getSongsByAlbumId(albumId).map { songEntities ->
-                songEntities.filter { songEntity ->
-                    !initialSetupDone || allowedDirs.contains(songEntity.parentDirectoryPath)
-                }.map { it.toSong() }
-            }
-        }.flowOn(Dispatchers.IO)
+            musicDao.getSongsByAlbumId(albumId),
+            directoryFilterConfig,
+            allArtistsFlow,
+            allCrossRefsFlow
+        ) { songEntities, config, artists, crossRefs ->
+            mapSongList(songEntities, config, artists, crossRefs)
+        }.conflate().flowOn(Dispatchers.IO)
     }
 
     override fun getArtistById(artistId: Long): Flow<Artist?> {
         LogUtils.d(this, "getArtistById: $artistId")
+        // Only return the artist if the user has access to at least one song by this artist
         return combine(
-            userPreferencesRepository.allowedDirectoriesFlow,
-            userPreferencesRepository.initialSetupDoneFlow
-        ) { allowedDirs, initialSetupDone ->
-            Pair(allowedDirs.toList(), initialSetupDone)
-        }.flatMapLatest { (allowedDirs, initialSetupDone) ->
-            musicDao.getSongsByArtistId(artistId)
-                .map { songEntities ->
-                    val permittedSongsInArtist = songEntities.filter { songEntity ->
-                        if (!initialSetupDone) true
-                        else allowedDirs.contains(songEntity.parentDirectoryPath)
-                    }
-                    if (initialSetupDone && allowedDirs.isEmpty() && songEntities.isNotEmpty()) {
-                        null
-                    } else if (permittedSongsInArtist.isNotEmpty() || !initialSetupDone) {
-                        musicDao.getArtistById(artistId).map { it?.toArtist() }
-                    } else {
-                        flowOf(null)
-                    }
-                }.flatMapLatest { it!! }
+            musicDao.getArtistById(artistId),
+            permittedSongsFlow,
+            allCrossRefsFlow
+        ) { artistEntity, allowedSongs, crossRefs ->
+            val allowedSongIds = allowedSongs.map { it.id }.toSet()
+            val allowedCrossRefs = crossRefs.filterBySongs(allowedSongIds)
+            val hasAccess = artistEntity != null && (
+                allowedCrossRefs.any { it.artistId == artistId } ||
+                allowedSongs.any { it.artistId == artistId }
+            )
+            if (hasAccess) artistEntity?.toArtist() else null
         }.flowOn(Dispatchers.IO)
+    }
+
+    override fun getArtistsForSong(songId: Long): Flow<List<Artist>> {
+        return musicDao.getArtistsForSong(songId).map { entities ->
+            entities.map { it.toArtist() }
+        }
     }
 
     override fun getSongsForArtist(artistId: Long): Flow<List<Song>> {
         LogUtils.d(this, "getSongsForArtist: $artistId")
         return combine(
-            userPreferencesRepository.allowedDirectoriesFlow,
-            userPreferencesRepository.initialSetupDoneFlow
-        ) { allowedDirs, initialSetupDone ->
-            Pair(allowedDirs.toList(), initialSetupDone)
-        }.flatMapLatest { (allowedDirs, initialSetupDone) ->
-            musicDao.getSongsByArtistId(artistId).map { songEntities ->
-                songEntities.filter { songEntity ->
-                    !initialSetupDone || allowedDirs.contains(songEntity.parentDirectoryPath)
-                }.map { it.toSong() }
-            }
-        }.flowOn(Dispatchers.IO)
+            musicDao.getSongsForArtist(artistId), // Use junction table query
+            directoryFilterConfig,
+            allArtistsFlow,
+            allCrossRefsFlow
+        ) { songEntities, config, artists, crossRefs ->
+            mapSongList(songEntities, config, artists, crossRefs)
+        }.conflate().flowOn(Dispatchers.IO)
     }
 
     override suspend fun getAllUniqueAudioDirectories(): Set<String> = withContext(Dispatchers.IO) {
@@ -218,7 +281,7 @@ class MusicRepositoryImpl @Inject constructor(
         directoryScanMutex.withLock {
             val directories = mutableSetOf<String>()
             val projection = arrayOf(MediaStore.Audio.Media.DATA)
-            val selection = "${MediaStore.Audio.Media.IS_MUSIC} != 0"
+            val selection = "(${MediaStore.Audio.Media.IS_MUSIC} != 0 OR ${MediaStore.Audio.Media.DATA} LIKE '%.m4a' OR ${MediaStore.Audio.Media.DATA} LIKE '%.flac')"
             context.contentResolver.query(
                 MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
                 projection, selection, null, null
@@ -229,35 +292,15 @@ class MusicRepositoryImpl @Inject constructor(
                 }
             }
             LogUtils.i(this, "Found ${directories.size} unique audio directories")
-            val initialSetupDone = userPreferencesRepository.initialSetupDoneFlow.first()
-            if (!initialSetupDone && directories.isNotEmpty()) {
-                Log.i("MusicRepo", "Initial setup: saving all found audio directories (${directories.size}) as allowed.")
-                userPreferencesRepository.updateAllowedDirectories(directories)
-            }
             return@withLock directories
         }
     }
 
     override fun getAllUniqueAlbumArtUris(): Flow<List<Uri>> {
-        return combine(
-            userPreferencesRepository.allowedDirectoriesFlow,
-            userPreferencesRepository.initialSetupDoneFlow
-        ) { allowedDirs, initialSetupDone ->
-            Pair(allowedDirs.toList(), initialSetupDone)
-        }.flatMapLatest { (allowedDirs, initialSetupDone) ->
-            if (initialSetupDone && allowedDirs.isEmpty()) {
-                flowOf(emptyList<Uri>())
-            } else {
-                // Use the already modified musicDao.getSongs which handles directory filtering
-                musicDao.getSongs(
-                    allowedParentDirs = allowedDirs,
-                    applyDirectoryFilter = initialSetupDone
-                ).map { songEntities ->
-                    songEntities
-                        .mapNotNull { it.albumArtUriString?.toUri() }
-                        .distinct()
-                }
-            }
+        return permittedSongsFlow.map { songEntities ->
+            songEntities
+                .mapNotNull { it.albumArtUriString?.toUri() }
+                .distinct()
         }.flowOn(Dispatchers.IO)
     }
 
@@ -266,68 +309,65 @@ class MusicRepositoryImpl @Inject constructor(
     override fun searchSongs(query: String): Flow<List<Song>> {
         if (query.isBlank()) return flowOf(emptyList())
         return combine(
-            userPreferencesRepository.allowedDirectoriesFlow,
-            userPreferencesRepository.initialSetupDoneFlow
-        ) { allowedDirs, initialSetupDone ->
-            Pair(allowedDirs.toList(), initialSetupDone)
-        }.flatMapLatest { (allowedDirs, initialSetupDone) ->
-            if (initialSetupDone && allowedDirs.isEmpty()) {
-                flowOf(emptyList<Song>())
-            } else {
-                musicDao.searchSongs(
-                    query = query,
-                    allowedParentDirs = allowedDirs,
-                    applyDirectoryFilter = initialSetupDone
-                ).map { entities -> entities.map { it.toSong() } }
-            }
-        }.flowOn(Dispatchers.IO)
+            musicDao.searchSongs(
+                query = query,
+                allowedParentDirs = emptyList(),
+                applyDirectoryFilter = false
+            ),
+            directoryFilterConfig,
+            allArtistsFlow,
+            allCrossRefsFlow
+        ) { songs, config, artists, crossRefs ->
+            mapSongList(songs, config, artists, crossRefs)
+        }.conflate().flowOn(Dispatchers.IO)
     }
 
 
     override fun searchAlbums(query: String): Flow<List<Album>> {
         if (query.isBlank()) return flowOf(emptyList())
         return combine(
-            userPreferencesRepository.allowedDirectoriesFlow,
-            userPreferencesRepository.initialSetupDoneFlow
-        ) { allowedDirs, initialSetupDone ->
-            Pair(allowedDirs.toList(), initialSetupDone)
-        }.flatMapLatest { (allowedDirs, initialSetupDone) ->
-            if (initialSetupDone && allowedDirs.isEmpty()) {
-                flowOf(emptyList<Album>())
-            } else {
-                musicDao.searchAlbums(
-                    query = query,
-                    allowedParentDirs = allowedDirs,
-                    applyDirectoryFilter = initialSetupDone
-                ).map { entities -> entities.map { it.toAlbum() } }
-            }
-        }.flowOn(Dispatchers.IO)
+            musicDao.searchAlbums(
+                query = query,
+                allowedParentDirs = emptyList(),
+                applyDirectoryFilter = false
+            ),
+            permittedSongsFlow,
+            directoryFilterConfig
+        ) { albums, allowedSongs, _ ->
+            val allowedAlbumIds = allowedSongs.map { it.albumId }.toSet()
+            albums.filter { allowedAlbumIds.contains(it.id) }
+                .map { it.toAlbum() }
+        }.conflate().flowOn(Dispatchers.IO)
     }
 
     override fun searchArtists(query: String): Flow<List<Artist>> {
         if (query.isBlank()) return flowOf(emptyList())
         return combine(
-            userPreferencesRepository.allowedDirectoriesFlow,
-            userPreferencesRepository.initialSetupDoneFlow
-        ) { allowedDirs, initialSetupDone ->
-            Pair(allowedDirs.toList(), initialSetupDone)
-        }.flatMapLatest { (allowedDirs, initialSetupDone) ->
-            if (initialSetupDone && allowedDirs.isEmpty()) {
-                flowOf(emptyList<Artist>())
-            } else {
-                musicDao.searchArtists(
-                    query = query,
-                    allowedParentDirs = allowedDirs,
-                    applyDirectoryFilter = initialSetupDone
-                ).map { entities -> entities.map { it.toArtist() } }
-            }
-        }.flowOn(Dispatchers.IO)
+            musicDao.searchArtists(
+                query = query,
+                allowedParentDirs = emptyList(),
+                applyDirectoryFilter = false
+            ),
+            permittedSongsFlow,
+            directoryFilterConfig,
+            allCrossRefsFlow
+        ) { artists, allowedSongs, _, crossRefs ->
+            val allowedSongIds = allowedSongs.map { it.id }.toSet()
+            val allowedCrossRefs = crossRefs.filterBySongs(allowedSongIds)
+            val allowedArtistIds = allowedCrossRefs.map { it.artistId }.toMutableSet()
+            allowedArtistIds.addAll(allowedSongs.map { it.artistId })
+
+            artists.filter { allowedArtistIds.contains(it.id) }
+                .map { it.toArtist() }
+        }.conflate().flowOn(Dispatchers.IO)
     }
 
     override suspend fun searchPlaylists(query: String): List<Playlist> {
         if (query.isBlank()) return emptyList()
-        Log.d("MusicRepositoryImpl", "searchPlaylists called with query: $query. Not implemented.")
-        return emptyList()
+        return userPreferencesRepository.userPlaylistsFlow.first()
+            .filter { playlist ->
+                playlist.name.contains(query, ignoreCase = true)
+            }
     }
 
     override fun searchAll(query: String, filterType: SearchFilterType): Flow<List<SearchResultItem>> {
@@ -411,27 +451,26 @@ class MusicRepositoryImpl @Inject constructor(
         if (longIds.isEmpty()) return flowOf(emptyList())
 
         return combine(
-            userPreferencesRepository.allowedDirectoriesFlow,
-            userPreferencesRepository.initialSetupDoneFlow
-        ) { allowedDirs, initialSetupDone ->
-            Pair(allowedDirs.toList(), initialSetupDone)
-        }.flatMapLatest { (allowedDirs, initialSetupDone) ->
-            if (initialSetupDone && allowedDirs.isEmpty() && longIds.isNotEmpty()) {
-                // If setup is done, no dirs are allowed, but we are asking for specific songs,
-                // effectively these songs are not accessible.
-                flowOf(emptyList<Song>())
-            } else {
-                musicDao.getSongsByIds(
-                    songIds = longIds,
-                    allowedParentDirs = allowedDirs,
-                    applyDirectoryFilter = initialSetupDone
-                ).map { entities ->
-                    val songsMap = entities.associateBy { it.id.toString() }
-                    // Ensure the order of original songIds is preserved
-                    songIds.mapNotNull { idToFind -> songsMap[idToFind]?.toSong() }
-                }
-            }
-        }.flowOn(Dispatchers.IO)
+            musicDao.getSongsByIds(
+                songIds = longIds,
+                allowedParentDirs = emptyList(),
+                applyDirectoryFilter = false
+            ),
+            directoryFilterConfig,
+            allArtistsFlow,
+            allCrossRefsFlow
+        ) { entities, config, artists, crossRefs ->
+            val permittedEntities = entities.filterBlocked(config)
+            val mapped = mapSongList(permittedEntities, null, artists, crossRefs)
+            val songsMap = mapped.associateBy { it.id }
+            songIds.mapNotNull { idToFind -> songsMap[idToFind] }
+        }.conflate().flowOn(Dispatchers.IO)
+    }
+
+    override suspend fun getSongByPath(path: String): Song? {
+        return withContext(Dispatchers.IO) {
+            musicDao.getSongByPath(path)?.toSong()
+        }
     }
 
     override suspend fun invalidateCachesDependentOnAllowedDirectories() {
@@ -445,31 +484,27 @@ class MusicRepositoryImpl @Inject constructor(
 
     // Implementación de las nuevas funciones suspend para carga única
     override suspend fun getAllAlbumsOnce(): List<Album> = withContext(Dispatchers.IO) {
-        val allowedDirs = userPreferencesRepository.allowedDirectoriesFlow.first().toList()
-        val initialSetupDone = userPreferencesRepository.initialSetupDoneFlow.first()
+        val (songs, _) = permittedSongsOnce()
 
-        if (initialSetupDone && allowedDirs.isEmpty()) {
-            emptyList()
-        } else {
-            musicDao.getAllAlbumsList( // Llamando a la nueva función DAO suspend
-                allowedParentDirs = allowedDirs,
-                applyDirectoryFilter = initialSetupDone
-            ).map { it.toAlbum() }
-        }
+        val allowedAlbumIds = songs.map { it.albumId }.toSet()
+        val albums = musicDao.getAllAlbumsList(
+            allowedParentDirs = emptyList(),
+            applyDirectoryFilter = false
+        )
+        albums.filter { allowedAlbumIds.contains(it.id) }
+            .map { it.toAlbum() }
     }
 
     override suspend fun getAllArtistsOnce(): List<Artist> = withContext(Dispatchers.IO) {
-        val allowedDirs = userPreferencesRepository.allowedDirectoriesFlow.first().toList()
-        val initialSetupDone = userPreferencesRepository.initialSetupDoneFlow.first()
+        val (songs, _) = permittedSongsOnce()
+        val crossRefs = allCrossRefsFlow.first()
 
-        if (initialSetupDone && allowedDirs.isEmpty()) {
-            emptyList()
-        } else {
-            musicDao.getAllArtistsList( // Llamando a la nueva función DAO suspend
-                allowedParentDirs = allowedDirs,
-                applyDirectoryFilter = initialSetupDone
-            ).map { it.toArtist() }
-        }
+        val allowedSongIds = songs.map { it.id }.toSet()
+        val allowedArtistIds = crossRefs.filterBySongs(allowedSongIds).map { it.artistId }.toMutableSet()
+        allowedArtistIds.addAll(songs.map { it.artistId })
+        val artists = musicDao.getAllArtistsListRaw()
+        artists.filter { allowedArtistIds.contains(it.id) }
+            .map { it.toArtist() }
     }
 
     override suspend fun toggleFavoriteStatus(songId: String): Boolean = withContext(Dispatchers.IO) {
@@ -493,26 +528,16 @@ class MusicRepositoryImpl @Inject constructor(
         // Similar a getAlbumById, necesitamos considerar los directorios permitidos.
         // Si una canción existe pero está en un directorio no permitido, no debería devolverse.
         return combine(
-            userPreferencesRepository.allowedDirectoriesFlow,
-            userPreferencesRepository.initialSetupDoneFlow
-        ) { allowedDirs, initialSetupDone ->
-            Pair(allowedDirs.toList(), initialSetupDone)
-        }.flatMapLatest { (allowedDirs, initialSetupDone) ->
-            musicDao.getSongById(songLongId).map { songEntity ->
-                if (songEntity == null) {
-                    null
-                } else {
-                    val songIsPermitted = !initialSetupDone || allowedDirs.contains(songEntity.parentDirectoryPath)
-                    if (initialSetupDone && allowedDirs.isEmpty()) { // Setup done, no dirs allowed
-                        null
-                    } else if (songIsPermitted) {
-                        songEntity.toSong()
-                    } else {
-                        null
-                    }
-                }
-            }
-        }.flowOn(Dispatchers.IO)
+            musicDao.getSongById(songLongId),
+            directoryFilterConfig,
+            allArtistsFlow,
+            allCrossRefsFlow
+        ) { songEntity, config, artists, crossRefs ->
+            songEntity?.takeIf { song ->
+                val normalizedParent = normalizePath(song.parentDirectoryPath)
+                config.normalizedBlocked.none { normalizedParent == it || normalizedParent.startsWith("$it/") }
+            }?.let { mapSingleSong(it, null, artists, crossRefs) }
+        }.conflate().flowOn(Dispatchers.IO)
     }
 
     override fun getGenres(): Flow<List<Genre>> {
@@ -537,7 +562,7 @@ class MusicRepositoryImpl @Inject constructor(
                     darkColorHex = darkColorHex,
                     onDarkColorHex = "#FFFFFF"  // Default white for dark theme text
                 )
-            }.sortedBy { it.name }
+            }.sortedBy { it.name.lowercase() }
 
             // Ensure "Unknown" genre is last if it exists.
             val unknownGenre = dynamicGenres.find { it.id == "unknown" }
@@ -546,7 +571,7 @@ class MusicRepositoryImpl @Inject constructor(
             } else {
                 dynamicGenres
             }
-        }.flowOn(Dispatchers.IO)
+        }.conflate().flowOn(Dispatchers.IO)
     }
 
     override suspend fun getLyrics(song: Song): Lyrics? {
@@ -564,7 +589,129 @@ class MusicRepositoryImpl @Inject constructor(
         return lyricsRepository.fetchFromRemote(song)
     }
 
+    override suspend fun searchRemoteLyrics(song: Song): Result<Pair<String, List<LyricsSearchResult>>> {
+        return lyricsRepository.searchRemote(song)
+    }
+
     override suspend fun updateLyrics(songId: Long, lyrics: String) {
         lyricsRepository.updateLyrics(songId, lyrics)
+    }
+
+    override suspend fun resetLyrics(songId: Long) {
+        lyricsRepository.resetLyrics(songId)
+    }
+
+    override suspend fun resetAllLyrics() {
+        lyricsRepository.resetAllLyrics()
+    }
+
+    override fun getMusicFolders(): Flow<List<MusicFolder>> {
+        return combine(
+            getAudioFiles(),
+            userPreferencesRepository.allowedDirectoriesFlow,
+            userPreferencesRepository.blockedDirectoriesFlow,
+            userPreferencesRepository.isFolderFilterActiveFlow
+        ) { songs, allowedDirs, blockedDirs, isFolderFilterActive ->
+            val resolver = DirectoryRuleResolver(
+                allowedDirs.map(::normalizePath).toSet(),
+                blockedDirs.map(::normalizePath).toSet()
+            )
+            val songsToProcess = if (isFolderFilterActive && blockedDirs.isNotEmpty()) {
+                songs.filter { song ->
+                    val songDir = File(song.path).parentFile ?: return@filter false
+                    val normalized = normalizePath(songDir.path)
+                    !resolver.isBlocked(normalized)
+                }
+            } else {
+                songs
+            }
+
+            if (songsToProcess.isEmpty()) return@combine emptyList()
+
+            data class TempFolder(
+                val path: String,
+                val name: String,
+                val songs: MutableList<Song> = mutableListOf(),
+                val subFolderPaths: MutableSet<String> = mutableSetOf()
+            )
+
+            val tempFolders = mutableMapOf<String, TempFolder>()
+
+            // Optimization: Group songs by parent folder first to reduce File object creations and loop iterations
+            val songsByFolder = songsToProcess.groupBy { File(it.path).parent }
+
+            songsByFolder.forEach { (folderPath, songsInFolder) ->
+                if (folderPath != null) {
+                    val folderFile = File(folderPath)
+                    // Create or get the leaf folder
+                    val leafFolder = tempFolders.getOrPut(folderPath) { TempFolder(folderPath, folderFile.name) }
+                    leafFolder.songs.addAll(songsInFolder)
+
+                    // Build hierarchy upwards
+                    var currentPath = folderPath
+                    var currentFile = folderFile
+
+                    while (currentFile.parentFile != null) {
+                        val parentFile = currentFile.parentFile!!
+                        val parentPath = parentFile.path
+
+                        val parentFolder = tempFolders.getOrPut(parentPath) { TempFolder(parentPath, parentFile.name) }
+                        val added = parentFolder.subFolderPaths.add(currentPath)
+
+                        if (!added) {
+                            // If the link already existed, we have processed this branch up to the root already.
+                            break
+                        }
+
+                        currentFile = parentFile
+                        currentPath = parentPath
+                    }
+                }
+            }
+
+            fun buildImmutableFolder(path: String, visited: MutableSet<String>): MusicFolder? {
+                if (path in visited) return null
+                visited.add(path)
+                val tempFolder = tempFolders[path] ?: return null
+                val subFolders = tempFolder.subFolderPaths
+                    .mapNotNull { subPath -> buildImmutableFolder(subPath, visited.toMutableSet()) }
+                    .sortedBy { it.name.lowercase() }
+                    .toImmutableList()
+                return MusicFolder(
+                    path = tempFolder.path,
+                    name = tempFolder.name,
+                    songs = tempFolder.songs
+                        .sortedWith(
+                            compareBy<Song> { if (it.trackNumber > 0) it.trackNumber else Int.MAX_VALUE }
+                                .thenBy { it.title.lowercase() }
+                        )
+                        .toImmutableList(),
+                    subFolders = subFolders
+                )
+            }
+
+            val storageRootPath = Environment.getExternalStorageDirectory().path
+            val rootTempFolder = tempFolders[storageRootPath]
+
+            val result = rootTempFolder?.subFolderPaths?.mapNotNull { path ->
+                buildImmutableFolder(path, mutableSetOf())
+            }?.filter { it.totalSongCount > 0 }?.sortedBy { it.name.lowercase() } ?: emptyList()
+
+            // Fallback for devices that might not use the standard storage root path
+            if (result.isEmpty() && tempFolders.isNotEmpty()) {
+                 val allSubFolderPaths = tempFolders.values.flatMap { it.subFolderPaths }.toSet()
+                 val topLevelPaths = tempFolders.keys - allSubFolderPaths
+                 return@combine topLevelPaths
+                     .mapNotNull { buildImmutableFolder(it, mutableSetOf()) }
+                     .filter { it.totalSongCount > 0 }
+                    .sortedBy { it.name.lowercase() }
+             }
+
+            result
+        }.conflate().flowOn(Dispatchers.IO)
+    }
+
+    override suspend fun deleteById(id: Long) {
+        musicDao.deleteById(id)
     }
 }

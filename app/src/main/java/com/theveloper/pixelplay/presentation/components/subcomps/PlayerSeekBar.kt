@@ -75,7 +75,7 @@ fun PlayerSeekBar(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(0.7f),
-            valueProvider = { progressFraction },
+            value = progressFraction,
             onValueChange = { newFraction ->
                 onSeek((newFraction * totalDuration).roundToLong())
             },
@@ -84,7 +84,7 @@ fun PlayerSeekBar(
             activeTrackColor = primaryColor,
             inactiveTrackColor = primaryColor.copy(alpha = 0.2f),
             thumbColor = primaryColor,
-            waveFrequency = 0.08f,
+            waveLength = 30.dp,
             isPlaying = isPlaying
         )
         Text(

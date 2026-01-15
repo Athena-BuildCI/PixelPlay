@@ -5,6 +5,7 @@ plugins {
     alias(libs.plugins.dagger.hilt.android)
     kotlin("plugin.serialization") version "2.1.0"
     alias(libs.plugins.jetbrains.kotlin.android)
+    alias(libs.plugins.baselineprofile)
     // id("com.google.protobuf") version "0.9.5" // Eliminado plugin de Protobuf
 }
 
@@ -20,6 +21,7 @@ android {
         resources {
             excludes += "META-INF/INDEX.LIST"
             excludes += "META-INF/DEPENDENCIES"
+            excludes += "/META-INF/io.netty.versions.properties"
         }
     }
 
@@ -34,6 +36,10 @@ android {
     }
 
     buildTypes {
+        debug {
+            applicationIdSuffix = ".debug"
+        }
+
         release {
             isMinifyEnabled = true
             isShrinkResources = true
@@ -41,9 +47,19 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            signingConfig = signingConfigs.getByName("debug")
+        }
+
+        // AGREGA ESTE BLOQUE:
+        create("benchmark") {
+            initWith(getByName("release"))
+            signingConfig = signingConfigs.getByName("debug")
+            matchingFallbacks += listOf("release")
+            isDebuggable = false // Esto quita el error que mencionaste
         }
     }
     compileOptions {
+        isCoreLibraryDesugaringEnabled = true
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
     }
@@ -66,10 +82,19 @@ android {
             "-P",
             "plugin:androidx.compose.compiler.plugins.kotlin:metricsDestination=${project.buildDir.absolutePath}/compose_compiler_metrics"
         )
+
+        //Stability
+        freeCompilerArgs += listOf(
+            "-P",
+            "plugin:androidx.compose.compiler.plugins.kotlin:stabilityConfigurationPath=${project.rootDir.absolutePath}/app/compose_stability.conf"
+        )
     }
 }
 
 dependencies {
+    implementation(libs.androidx.profileinstaller)
+    "baselineProfile"(project(":baselineprofile"))
+    coreLibraryDesugaring(libs.desugar.jdk.libs)
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
@@ -80,6 +105,10 @@ dependencies {
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
     implementation(libs.generativeai)
+    implementation(libs.androidx.mediarouter)
+    implementation(libs.play.services.cast.framework)
+    implementation(libs.androidx.navigation.runtime.ktx)
+    implementation(libs.androidx.compose.material3)
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
@@ -159,7 +188,9 @@ dependencies {
     implementation(libs.androidx.media3.exoplayer)
     implementation(libs.androidx.media3.ui)
     implementation(libs.androidx.media3.session)
-//    implementation(libs.androidx.media3.exoplayer.ffmpeg)
+    implementation(libs.androidx.media.router)
+    implementation(libs.google.play.services.cast.framework)
+    implementation(libs.androidx.media3.exoplayer.ffmpeg)
 
     // Palette API for color extraction
     implementation(libs.androidx.palette.ktx)
@@ -172,7 +203,6 @@ dependencies {
 
     //Foundation
     implementation(libs.androidx.foundation)
-
     //Wavy slider
     implementation(libs.wavy.slider)
 
@@ -220,9 +250,10 @@ dependencies {
     // Timber
     implementation(libs.timber)
 
-    // JAudioTagger for metadata editing
-    implementation("org.jflac:jflac-codec:1.5.2")
-    implementation(libs.jaudiotagger)
+    // TagLib for metadata editing (supports mp3, flac, m4a, etc.)
+    implementation(libs.taglib)
+    // VorbisJava for Opus/Ogg metadata editing (TagLib has issues with Opus via file descriptors)
+    implementation(libs.vorbisjava.core)
 
     // Retrofit & OkHttp
     implementation(libs.retrofit)
@@ -230,9 +261,21 @@ dependencies {
     implementation(libs.okhttp)
     implementation(libs.logging.interceptor)
 
+    // Ktor for HTTP Server
+    implementation(libs.ktor.server.core)
+    implementation(libs.ktor.server.netty)
+    implementation(libs.kotlinx.coroutines.core)
+
     implementation(libs.androidx.ui.text.google.fonts)
 
     implementation(libs.accompanist.drawablepainter)
+    implementation(kotlin("test"))
+
+    // Android Auto
+    implementation(libs.androidx.media)
+    implementation(libs.androidx.app)
+    implementation(libs.androidx.app.projected)
+
 }
 
 

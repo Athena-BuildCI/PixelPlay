@@ -117,7 +117,7 @@ class PixelPlayGlanceWidget : GlanceAppWidget() {
         size: DpSize,
         context: Context
     ) {
-        val title = playerInfo.songTitle.ifEmpty { "PixelPlay" }
+        val title = playerInfo.songTitle.ifEmpty { "PixelPlayer" }
         val artist = playerInfo.artistName.ifEmpty { "Toca para abrir" }
         val isPlaying = playerInfo.isPlaying
         val isFavorite = playerInfo.isFavorite
@@ -1163,14 +1163,31 @@ class PixelPlayGlanceWidget : GlanceAppWidget() {
                     contentScale = ContentScale.Crop
                 )
             } else {
-                // Placeholder with tint
-                Image(
-                    provider = ImageProvider(R.drawable.rounded_album_24),
-                    contentDescription = "Album Art Placeholder",
-                    modifier = GlanceModifier.fillMaxSize().cornerRadius(cornerRadius),
-                    contentScale = ContentScale.Crop,
-                    colorFilter = ColorFilter.tint(GlanceTheme.colors.onSurface)
-                )
+                val placeholderBaseSize = size ?: minOf(widgetDpSize.width, widgetDpSize.height)
+                val resolvedPlaceholderBaseSize = when {
+                    placeholderBaseSize == Dp.Unspecified || placeholderBaseSize <= 0.dp -> 72.dp
+                    else -> placeholderBaseSize
+                }
+
+                val placeholderSize = resolvedPlaceholderBaseSize
+                    .times(0.65f)
+                    .coerceIn(36.dp, 96.dp)
+
+                Box(
+                    modifier = GlanceModifier
+                        .fillMaxSize()
+                        .cornerRadius(cornerRadius)
+                        .background(GlanceTheme.colors.surfaceVariant),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Image(
+                        provider = ImageProvider(R.drawable.ic_music_placeholder),
+                        contentDescription = "Album Art Placeholder",
+                        modifier = GlanceModifier.size(placeholderSize),
+                        contentScale = ContentScale.Fit,
+                        colorFilter = ColorFilter.tint(GlanceTheme.colors.onSurfaceVariant)
+                    )
+                }
             }
         }
     }

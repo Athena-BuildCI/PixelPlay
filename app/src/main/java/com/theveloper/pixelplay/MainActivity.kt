@@ -4,6 +4,8 @@ import android.Manifest
 import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Color
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
@@ -27,7 +29,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.CircularWavyProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -75,11 +78,15 @@ import com.theveloper.pixelplay.presentation.navigation.AppNavigation
 import com.theveloper.pixelplay.presentation.navigation.Screen
 import com.theveloper.pixelplay.presentation.screens.SetupScreen
 import com.theveloper.pixelplay.presentation.viewmodel.MainViewModel
+import com.theveloper.pixelplay.presentation.viewmodel.PlayerSheetState
 import com.theveloper.pixelplay.presentation.viewmodel.PlayerViewModel
 import com.theveloper.pixelplay.ui.theme.DarkColorScheme
 import com.theveloper.pixelplay.ui.theme.LightColorScheme
 import com.theveloper.pixelplay.ui.theme.PixelPlayTheme
+import com.theveloper.pixelplay.utils.CrashHandler
+import com.theveloper.pixelplay.utils.CrashLogData
 import com.theveloper.pixelplay.utils.LogUtils
+import com.theveloper.pixelplay.presentation.components.CrashReportDialog
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.collections.immutable.persistentListOf
 import kotlinx.coroutines.delay
@@ -93,6 +100,7 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Spring
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
@@ -120,13 +128,25 @@ import com.theveloper.pixelplay.presentation.components.NavBarContentHeight
 import com.theveloper.pixelplay.presentation.components.NavBarContentHeightFullWidth
 import kotlin.math.pow
 import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.NavigationBarDefaults
 import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.unit.lerp
+import com.theveloper.pixelplay.data.preferences.AppThemeMode
 import com.theveloper.pixelplay.data.preferences.NavBarStyle
+import com.theveloper.pixelplay.data.preferences.UserPreferencesRepository
+import com.theveloper.pixelplay.data.worker.SyncManager
+import com.theveloper.pixelplay.data.worker.SyncProgress
 import com.theveloper.pixelplay.presentation.components.MiniPlayerBottomSpacer
 import racra.compose.smooth_corner_rect_library.AbsoluteSmoothCornerShape
+import com.theveloper.pixelplay.presentation.components.AppSidebarDrawer
+import com.theveloper.pixelplay.presentation.components.DrawerDestination
+import androidx.compose.material3.DrawerValue
+import androidx.compose.material3.rememberDrawerState
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
+import javax.inject.Inject
 
 @Immutable
 data class BottomNavItem(
@@ -142,6 +162,14 @@ class MainActivity : ComponentActivity() {
 
     private val playerViewModel: PlayerViewModel by viewModels()
     private var mediaControllerFuture: ListenableFuture<MediaController>? = null
+    @Inject
+    lateinit var userPreferencesRepository: UserPreferencesRepository // Inject here
+    @Inject
+    lateinit var syncManager: SyncManager
+    
+    // For handling shortcut navigation - using StateFlow so composables can observe changes
+    private val _pendingPlaylistNavigation = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
+    private val _pendingShuffleAll = kotlinx.coroutines.flow.MutableStateFlow(false)
 
     private val requestAllFilesAccessLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { _ ->
         // Handle the result in onResume
@@ -151,17 +179,42 @@ class MainActivity : ComponentActivity() {
         LogUtils.d(this, "onCreate")
         installSplashScreen()
         enableEdgeToEdge()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            window.navigationBarColor = Color.TRANSPARENT
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            window.isNavigationBarContrastEnforced = false
+        }
         super.onCreate(savedInstanceState)
+
+        // LEER SEÑAL DE BENCHMARK
+        val isBenchmarkMode = intent.getBooleanExtra("is_benchmark", false)
 
         setContent {
             val mainViewModel: MainViewModel = hiltViewModel()
-            val useDarkTheme = isSystemInDarkTheme()
+            val systemDarkTheme = isSystemInDarkTheme()
+            val appThemeMode by userPreferencesRepository.appThemeModeFlow.collectAsState(initial = AppThemeMode.FOLLOW_SYSTEM)
+            val useDarkTheme = when (appThemeMode) {
+                AppThemeMode.DARK -> true
+                AppThemeMode.LIGHT -> false
+                else -> systemDarkTheme
+            }
             val isSetupComplete by mainViewModel.isSetupComplete.collectAsState()
             var showSetupScreen by remember { mutableStateOf<Boolean?>(null) }
+            
+            // Crash report dialog state
+            var showCrashReportDialog by remember { mutableStateOf(false) }
+            var crashLogData by remember { mutableStateOf<CrashLogData?>(null) }
 
             LaunchedEffect(isSetupComplete) {
-                if (showSetupScreen == null) {
-                    showSetupScreen = !isSetupComplete
+                showSetupScreen = if (isBenchmarkMode) false else !isSetupComplete
+            }
+            
+            // Check for crash log when app starts
+            LaunchedEffect(Unit) {
+                if (CrashHandler.hasCrashLog()) {
+                    crashLogData = CrashHandler.getCrashLog()
+                    showCrashReportDialog = true
                 }
             }
 
@@ -187,9 +240,21 @@ class MainActivity : ComponentActivity() {
                             if (targetState == true) {
                                 SetupScreen(onSetupComplete = { showSetupScreen = false })
                             } else {
-                                HandlePermissions(mainViewModel)
+                                HandlePermissions(mainViewModel, isBenchmarkMode)
                             }
                         }
+                    }
+                    
+                    // Show crash report dialog if needed
+                    if (showCrashReportDialog && crashLogData != null) {
+                        CrashReportDialog(
+                            crashLog = crashLogData!!,
+                            onDismiss = {
+                                CrashHandler.clearCrashLog()
+                                crashLogData = null
+                                showCrashReportDialog = false
+                            }
+                        )
                     }
                 }
             }
@@ -203,14 +268,96 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleIntent(intent: Intent?) {
-        if (intent?.getBooleanExtra("ACTION_SHOW_PLAYER", false) == true) {
-            playerViewModel.showPlayer()
+        if (intent == null) return
+
+        when {
+            // Handle shuffle all shortcut
+            intent.action == ACTION_SHUFFLE_ALL -> {
+                _pendingShuffleAll.value = true
+                intent.action = null // Clear action to prevent re-triggering
+            }
+            
+            // Handle playlist shortcut
+            intent.action == ACTION_OPEN_PLAYLIST -> {
+                intent.getStringExtra(EXTRA_PLAYLIST_ID)?.let { playlistId ->
+                    _pendingPlaylistNavigation.value = playlistId
+                }
+                intent.action = null
+            }
+
+            intent.getBooleanExtra("ACTION_SHOW_PLAYER", false) -> {
+                playerViewModel.showPlayer()
+            }
+
+            intent.action == Intent.ACTION_VIEW && intent.data != null -> {
+                intent.data?.let { uri ->
+                    persistUriPermissionIfNeeded(intent, uri)
+                    playerViewModel.playExternalUri(uri)
+                }
+                clearExternalIntentPayload(intent)
+            }
+
+            intent.action == Intent.ACTION_SEND && intent.type?.startsWith("audio/") == true -> {
+                resolveStreamUri(intent)?.let { uri ->
+                    persistUriPermissionIfNeeded(intent, uri)
+                    playerViewModel.playExternalUri(uri)
+                }
+                clearExternalIntentPayload(intent)
+            }
         }
+    }
+    
+    companion object {
+        const val ACTION_SHUFFLE_ALL = "com.theveloper.pixelplay.ACTION_SHUFFLE_ALL"
+        const val ACTION_OPEN_PLAYLIST = "com.theveloper.pixelplay.ACTION_OPEN_PLAYLIST"
+        const val EXTRA_PLAYLIST_ID = "playlist_id"
+    }
+
+    private fun resolveStreamUri(intent: Intent): Uri? {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)?.let { return it }
+        } else {
+            @Suppress("DEPRECATION")
+            val legacyUri = intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
+            if (legacyUri != null) return legacyUri
+        }
+
+        intent.clipData?.let { clipData ->
+            if (clipData.itemCount > 0) {
+                return clipData.getItemAt(0).uri
+            }
+        }
+
+        return intent.data
+    }
+
+    private fun persistUriPermissionIfNeeded(intent: Intent, uri: Uri) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
+            val hasPersistablePermission = intent.flags and Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION != 0
+            if (hasPersistablePermission) {
+                val takeFlags = intent.flags and (Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                if (takeFlags != 0) {
+                    try {
+                        contentResolver.takePersistableUriPermission(uri, takeFlags)
+                    } catch (securityException: SecurityException) {
+                        Log.w("MainActivity", "Unable to persist URI permission for $uri", securityException)
+                    } catch (illegalArgumentException: IllegalArgumentException) {
+                        Log.w("MainActivity", "Persistable URI permission not granted for $uri", illegalArgumentException)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun clearExternalIntentPayload(intent: Intent) {
+        intent.data = null
+        intent.clipData = null
+        intent.removeExtra(Intent.EXTRA_STREAM)
     }
 
     @OptIn(ExperimentalPermissionsApi::class)
     @Composable
-    private fun HandlePermissions(mainViewModel: MainViewModel) {
+    private fun HandlePermissions(mainViewModel: MainViewModel, isBenchmark: Boolean) {
         val permissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             listOf(Manifest.permission.READ_MEDIA_AUDIO, Manifest.permission.POST_NOTIFICATIONS)
         } else {
@@ -219,6 +366,8 @@ class MainActivity : ComponentActivity() {
         val permissionState = rememberMultiplePermissionsState(permissions = permissions)
 
         var showAllFilesAccessDialog by remember { mutableStateOf(false) }
+        val needsAllFilesAccess = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+                !android.os.Environment.isExternalStorageManager()
 
         LaunchedEffect(Unit) {
             if (!permissionState.allPermissionsGranted) {
@@ -231,7 +380,7 @@ class MainActivity : ComponentActivity() {
                 LogUtils.i(this, "Permissions granted")
                 Log.i("MainActivity", "Permissions granted. Calling mainViewModel.startSync()")
                 mainViewModel.startSync()
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !android.os.Environment.isExternalStorageManager()) {
+                if (needsAllFilesAccess && !isBenchmark) {
                     showAllFilesAccessDialog = true
                 }
             }
@@ -264,9 +413,57 @@ class MainActivity : ComponentActivity() {
         val navController = rememberNavController()
         val isSyncing by mainViewModel.isSyncing.collectAsState()
         val isLibraryEmpty by mainViewModel.isLibraryEmpty.collectAsState()
+        val syncProgress by mainViewModel.syncProgress.collectAsState()
+        
+        // Observe pending shuffle action
+        val pendingShuffleAll by _pendingShuffleAll.collectAsState()
+        var processedShuffle by remember { mutableStateOf(false) }
+        
+        LaunchedEffect(pendingShuffleAll) {
+            if (pendingShuffleAll && !processedShuffle) {
+                processedShuffle = true
+                // Wait a bit for the library to be ready
+                kotlinx.coroutines.delay(500)
+                playerViewModel.shuffleAllSongs()
+                _pendingShuffleAll.value = false
+            } else if (!pendingShuffleAll) {
+                processedShuffle = false
+            }
+        }
+        
+        // Observe pending playlist navigation
+        val pendingPlaylistNav by _pendingPlaylistNavigation.collectAsState()
+        var processedPlaylistId by remember { mutableStateOf<String?>(null) }
+        
+        LaunchedEffect(pendingPlaylistNav) {
+            val playlistId = pendingPlaylistNav
+            // Only process if we have a new playlist ID that hasn't been processed yet
+            if (playlistId != null && playlistId != processedPlaylistId) {
+                processedPlaylistId = playlistId
+                // Wait for navigation graph to be ready (retry with delay)
+                var success = false
+                var attempts = 0
+                while (!success && attempts < 50) { // 5 seconds max
+                    try {
+                        navController.navigate(Screen.PlaylistDetail.createRoute(playlistId))
+                        success = true
+                        _pendingPlaylistNavigation.value = null
+                    } catch (e: IllegalArgumentException) {
+                        kotlinx.coroutines.delay(100)
+                        attempts++
+                    }
+                }
+            } else if (playlistId == null) {
+                // Reset so the same playlist can be opened again
+                processedPlaylistId = null
+            }
+        }
 
         // Estado para controlar si el indicador de carga puede mostrarse después de un delay
         var canShowLoadingIndicator by remember { mutableStateOf(false) }
+        // Track when the loading indicator was first shown for minimum display time
+        var loadingShownTimestamp by remember { mutableStateOf(0L) }
+        val minimumDisplayDuration = 1500L // Show loading for at least 1.5 seconds
 
         val shouldPotentiallyShowLoading = isSyncing && isLibraryEmpty
 
@@ -279,10 +476,19 @@ class MainActivity : ComponentActivity() {
                 // ya que el estado podría haber cambiado.
                 if (mainViewModel.isSyncing.value && mainViewModel.isLibraryEmpty.value) {
                     canShowLoadingIndicator = true
+                    loadingShownTimestamp = System.currentTimeMillis()
                 }
             } else {
-                // Si las condiciones ya no se cumplen, asegúrate de que no se muestre
+                // Ensure minimum display time before hiding
+                if (canShowLoadingIndicator && loadingShownTimestamp > 0) {
+                    val elapsed = System.currentTimeMillis() - loadingShownTimestamp
+                    val remaining = minimumDisplayDuration - elapsed
+                    if (remaining > 0) {
+                        delay(remaining)
+                    }
+                }
                 canShowLoadingIndicator = false
+                loadingShownTimestamp = 0L
             }
         }
 
@@ -290,8 +496,8 @@ class MainActivity : ComponentActivity() {
             MainUI(playerViewModel, navController)
 
             // Muestra el LoadingOverlay solo si las condiciones se cumplen Y el delay ha pasado
-            if (shouldPotentiallyShowLoading && canShowLoadingIndicator) {
-                LoadingOverlay()
+            if (canShowLoadingIndicator) {
+                LoadingOverlay(syncProgress)
             }
         }
         Trace.endSection() // End MainActivity.MainAppContent
@@ -311,6 +517,8 @@ class MainActivity : ComponentActivity() {
         }
         val navBackStackEntry by navController.currentBackStackEntryAsState()
         val currentRoute = navBackStackEntry?.destination?.route
+        var isSearchBarActive by remember { mutableStateOf(false) }
+
         val routesWithHiddenNavigationBar = remember {
             setOf(
                 Screen.Settings.route,
@@ -321,20 +529,31 @@ class MainActivity : ComponentActivity() {
                 Screen.ArtistDetail.route,
                 Screen.DJSpace.route,
                 Screen.NavBarCrRad.route,
-                Screen.About.route
+                Screen.About.route,
+                Screen.Stats.route,
+                Screen.EditTransition.route,
+                Screen.Experimental.route,
+                Screen.ArtistSettings.route,
+                Screen.Equalizer.route,
+                Screen.SettingsCategory.route,
+                Screen.DelimiterConfig.route
             )
         }
-        val shouldHideNavigationBar by remember(currentRoute) {
+        val shouldHideNavigationBar by remember(currentRoute, isSearchBarActive) {
             derivedStateOf {
-                currentRoute?.let { route ->
-                    routesWithHiddenNavigationBar.any { hiddenRoute ->
-                        if (hiddenRoute.contains("{")) {
-                            route.startsWith(hiddenRoute.substringBefore("{"))
-                        } else {
-                            route == hiddenRoute
+                if (currentRoute == Screen.Search.route && isSearchBarActive) {
+                    true
+                } else {
+                    currentRoute?.let { route ->
+                        routesWithHiddenNavigationBar.any { hiddenRoute ->
+                            if (hiddenRoute.contains("{")) {
+                                route.startsWith(hiddenRoute.substringBefore("{"))
+                            } else {
+                                route == hiddenRoute
+                            }
                         }
-                    }
-                } ?: false
+                    } ?: false
+                }
             }
         }
 
@@ -348,12 +567,30 @@ class MainActivity : ComponentActivity() {
             0.dp
         }
 
-        Scaffold(
+        val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
+        val scope = rememberCoroutineScope()
+
+        AppSidebarDrawer(
+            drawerState = drawerState,
+            selectedRoute = currentRoute ?: Screen.Home.route,
+            onDestinationSelected = { destination ->
+                scope.launch { drawerState.close() }
+                when (destination) {
+                    DrawerDestination.Home -> navController.navigate(Screen.Home.route) {
+                        popUpTo(Screen.Home.route) { inclusive = true }
+                    }
+                    DrawerDestination.Equalizer -> navController.navigate(Screen.Equalizer.route)
+                    DrawerDestination.Settings -> navController.navigate(Screen.Settings.route)
+                }
+            }
+        ) {
+            Scaffold(
             modifier = Modifier.fillMaxSize(),
             bottomBar = {
                 if (!shouldHideNavigationBar) {
                     val playerContentExpansionFraction = playerViewModel.playerContentExpansionFraction.value
                     val showPlayerContentArea = playerViewModel.stablePlayerState.collectAsState().value.currentSong != null
+                    val currentSheetContentState by playerViewModel.sheetState.collectAsState()
                     val navBarCornerRadius by playerViewModel.navBarCornerRadius.collectAsState()
                     val navBarElevation = 3.dp
 
@@ -389,6 +626,7 @@ class MainActivity : ComponentActivity() {
                     )
 
                     val navBarHideFraction = if (showPlayerContentArea) playerContentExpansionFraction else 0f
+                    val navBarHideFractionClamped = navBarHideFraction.coerceIn(0f, 1f)
 
                     val actualShape = remember(playerContentActualBottomRadius, showPlayerContentArea, navBarStyle, navBarCornerRadius) {
                         val bottomRadius = if (navBarStyle == NavBarStyle.FULL_WIDTH) 0.dp else navBarCornerRadius.dp
@@ -404,35 +642,48 @@ class MainActivity : ComponentActivity() {
                         )
                     }
 
+                    val bottomBarPadding = if (navBarStyle == NavBarStyle.FULL_WIDTH) 0.dp else systemNavBarInset
+
                     var componentHeightPx by remember { mutableStateOf(0) }
-                    val animatedTranslationY by remember(navBarHideFraction, componentHeightPx) { derivedStateOf { componentHeightPx * navBarHideFraction } }
+                    val density = LocalDensity.current
+                    val shadowOverflowPx = remember(navBarElevation, density) {
+                        with(density) { (navBarElevation * 8).toPx() }
+                    }
+                    val bottomBarPaddingPx = remember(bottomBarPadding, density) {
+                        with(density) { bottomBarPadding.toPx() }
+                    }
+                    val animatedTranslationY by remember(
+                        navBarHideFractionClamped,
+                        componentHeightPx,
+                        shadowOverflowPx,
+                        bottomBarPaddingPx,
+                    ) {
+                        derivedStateOf {
+                            (componentHeightPx + shadowOverflowPx + bottomBarPaddingPx) * navBarHideFractionClamped
+                        }
+                    }
 
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
+                            .padding(bottom = bottomBarPadding)
                             .onSizeChanged { componentHeightPx = it.height }
                             .graphicsLayer {
                                 translationY = animatedTranslationY
                                 alpha = 1f
                             }
                     ) {
-                        val navHeight: Dp
-                        val bottomPadding: Dp
-
-                        if (navBarStyle == NavBarStyle.DEFAULT) {
-                            navHeight = NavBarContentHeight
-                            bottomPadding = systemNavBarInset
-                        } else { // FULL_WIDTH
-                            navHeight = NavBarContentHeightFullWidth + systemNavBarInset
-                            bottomPadding = 0.dp
+                        val navHeight: Dp = if (navBarStyle == NavBarStyle.DEFAULT) {
+                            NavBarContentHeight
+                        } else {
+                            NavBarContentHeightFullWidth + systemNavBarInset
                         }
 
                         Surface(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(navHeight)
-                                .padding(horizontal = horizontalPadding)
-                                .padding(bottom = bottomPadding),
+                                .padding(horizontal = horizontalPadding),
                             color = NavigationBarDefaults.containerColor,
                             shape = actualShape,
                             shadowElevation = navBarElevation
@@ -442,7 +693,6 @@ class MainActivity : ComponentActivity() {
                                 navItems = commonNavItems,
                                 currentRoute = currentRoute,
                                 navBarStyle = navBarStyle,
-                                navBarInset = systemNavBarInset,
                                 modifier = Modifier.fillMaxSize()
                             )
                         }
@@ -475,7 +725,10 @@ class MainActivity : ComponentActivity() {
                 AppNavigation(
                     playerViewModel = playerViewModel,
                     navController = navController,
-                    paddingValues = innerPadding
+                    paddingValues = innerPadding,
+                    userPreferencesRepository = userPreferencesRepository,
+                    onSearchBarActiveChange = { isSearchBarActive = it },
+                    onOpenSidebar = { scope.launch { drawerState.open() } }
                 )
 
                 UnifiedPlayerSheet(
@@ -484,6 +737,7 @@ class MainActivity : ComponentActivity() {
                     collapsedStateHorizontalPadding = horizontalPadding,
                     hideMiniPlayer = shouldHideMiniPlayer,
                     containerHeight = containerHeight,
+                    navController = navController,
                     isNavBarHidden = shouldHideNavigationBar
                 )
 
@@ -501,10 +755,6 @@ class MainActivity : ComponentActivity() {
                     DismissUndoBar(
                         modifier = Modifier
                             .fillMaxWidth()
-//                            .background(
-//                                color = MaterialTheme.colorScheme.surfaceContainerHigh,
-//                                shape = CircleShape
-//                            )
                             .height(MiniPlayerHeight)
                             .padding(horizontal = 14.dp),
                         onUndo = { playerViewModel.undoDismissPlaylist() },
@@ -514,11 +764,23 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
-        Trace.endSection()
+    }
+    Trace.endSection()
     }
 
+    @OptIn(ExperimentalMaterial3ExpressiveApi::class)
     @Composable
-    private fun LoadingOverlay() {
+    private fun LoadingOverlay(syncProgress: SyncProgress) {
+        // Animate progress smoothly instead of jumping in steps
+        val animatedProgress by androidx.compose.animation.core.animateFloatAsState(
+            targetValue = syncProgress.progress,
+            animationSpec = androidx.compose.animation.core.spring(
+                dampingRatio = androidx.compose.animation.core.Spring.DampingRatioNoBouncy,
+                stiffness = androidx.compose.animation.core.Spring.StiffnessLow
+            ),
+            label = "SyncProgressAnimation"
+        )
+        
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -526,14 +788,31 @@ class MainActivity : ComponentActivity() {
                 .clickable(enabled = false, onClick = {}),
             contentAlignment = Alignment.Center
         ) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                CircularProgressIndicator()
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier.padding(horizontal = 32.dp)
+            ) {
+                CircularWavyProgressIndicator()
                 Spacer(modifier = Modifier.height(16.dp))
                 Text(
                     text = "Preparing your library...",
                     style = MaterialTheme.typography.titleMedium,
                     color = MaterialTheme.colorScheme.onBackground
                 )
+                
+                if (syncProgress.hasProgress) {
+                    Spacer(modifier = Modifier.height(16.dp))
+                    androidx.compose.material3.LinearWavyProgressIndicator(
+                        progress = { animatedProgress },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Scanned ${syncProgress.currentCount} of ${syncProgress.totalCount} songs",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
         }
     }
@@ -554,7 +833,7 @@ class MainActivity : ComponentActivity() {
             )
             Spacer(modifier = Modifier.height(8.dp))
             Text(
-                text = "PixelPlay needs access to your audio files to scan and play your music. Please grant permission to continue.",
+                text = "PixelPlayer needs access to your audio files to scan and play your music. Please grant permission to continue.",
                 style = MaterialTheme.typography.bodyLarge,
                 textAlign = TextAlign.Center,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -572,6 +851,11 @@ class MainActivity : ComponentActivity() {
         super.onStart()
         LogUtils.d(this, "onStart")
         playerViewModel.onMainActivityStart()
+
+        if (intent.getBooleanExtra("is_benchmark", false)) {
+            playerViewModel.loadDummyDataForBenchmark()
+        }
+
         val sessionToken = SessionToken(this, ComponentName(this, MusicService::class.java))
         mediaControllerFuture = MediaController.Builder(this, sessionToken).buildAsync()
         mediaControllerFuture?.addListener({
@@ -585,5 +869,11 @@ class MainActivity : ComponentActivity() {
             MediaController.releaseFuture(it)
         }
     }
+
+    override fun onResume() {
+        super.onResume()
+        syncManager.sync()
+    }
+
 
 }

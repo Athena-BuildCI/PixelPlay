@@ -19,7 +19,7 @@ fun AiMetadataDialog(
     val missingFields = remember {
         val fields = mutableListOf<String>()
         if (song.title.isBlank()) fields.add("Title")
-        if (song.artist.isBlank()) fields.add("Artist")
+        if (song.displayArtist.isBlank()) fields.add("Artist")
         if (song.album.isBlank()) fields.add("Album")
         if (song.genre.isNullOrBlank()) fields.add("Genre")
         fields
@@ -35,7 +35,10 @@ fun AiMetadataDialog(
                 Text("Select the fields you want to generate:")
                 Spacer(modifier = Modifier.height(16.dp))
                 LazyColumn {
-                    items(missingFields) { field ->
+                    items(
+                        items = missingFields,
+                        key = { it }
+                    ) { field ->
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier

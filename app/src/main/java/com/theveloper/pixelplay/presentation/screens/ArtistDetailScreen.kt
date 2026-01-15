@@ -1,28 +1,25 @@
+@file:OptIn(ExperimentalMaterial3ExpressiveApi::class)
 
 package com.theveloper.pixelplay.presentation.screens
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
-import androidx.compose.animation.core.tween
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.rounded.Album
-import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.Headphones
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.PlayArrow
-import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Shuffle
 import androidx.compose.material.icons.rounded.SurroundSound
 import androidx.compose.material3.*
@@ -30,7 +27,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -40,36 +36,46 @@ import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.lerp
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.dp
+import com.theveloper.pixelplay.ui.theme.LocalPixelPlayDarkTheme
 import androidx.compose.ui.unit.lerp
-import androidx.compose.ui.unit.sp
 import androidx.compose.ui.util.lerp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.media3.common.util.UnstableApi
 import androidx.navigation.NavController
 import com.theveloper.pixelplay.data.model.Artist
 import com.theveloper.pixelplay.presentation.components.MiniPlayerHeight
+import com.theveloper.pixelplay.presentation.components.NavBarContentHeight
+import com.theveloper.pixelplay.presentation.components.PlaylistBottomSheet
 import com.theveloper.pixelplay.presentation.components.SongInfoBottomSheet
 import com.theveloper.pixelplay.presentation.navigation.Screen
 import com.theveloper.pixelplay.presentation.viewmodel.ArtistDetailViewModel
+import com.theveloper.pixelplay.presentation.viewmodel.ArtistAlbumSection
 import com.theveloper.pixelplay.presentation.viewmodel.PlayerViewModel
 import com.theveloper.pixelplay.presentation.viewmodel.PlayerSheetState
+import com.theveloper.pixelplay.presentation.viewmodel.PlaylistViewModel
 import com.theveloper.pixelplay.utils.shapes.RoundedStarShape
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextGeometricTransform
+import androidx.compose.ui.unit.sp
+import coil.compose.AsyncImage
+import coil.request.ImageRequest
 
 @androidx.annotation.OptIn(UnstableApi::class)
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun ArtistDetailScreen(
     artistId: String,
     navController: NavController,
     playerViewModel: PlayerViewModel,
-    viewModel: ArtistDetailViewModel = hiltViewModel()
+    viewModel: ArtistDetailViewModel = hiltViewModel(),
+    playlistViewModel: PlaylistViewModel = hiltViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val stablePlayerState by playerViewModel.stablePlayerState.collectAsState()
@@ -78,9 +84,15 @@ fun ArtistDetailScreen(
     val favoriteIds by playerViewModel.favoriteSongIds.collectAsState()
     var showSongInfoBottomSheet by remember { mutableStateOf(false) }
     val selectedSongForInfo by playerViewModel.selectedSongForInfo.collectAsState()
-
+    val systemNavBarInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+    val bottomBarHeightDp = NavBarContentHeight + systemNavBarInset
+    var showPlaylistBottomSheet by remember { mutableStateOf(false) }
     val density = LocalDensity.current
     val coroutineScope = rememberCoroutineScope()
+
+    LaunchedEffect(Unit) {
+        playerViewModel.collapsePlayerSheet()
+    }
 
     // --- Lógica del Header Colapsable ---
     val statusBarHeight = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
@@ -162,7 +174,7 @@ fun ArtistDetailScreen(
             when {
                 uiState.isLoading && uiState.artist == null -> {
                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        CircularProgressIndicator()
+                        ContainedLoadingIndicator()
                     }
                 }
                 uiState.error != null && uiState.artist == null -> {
@@ -182,28 +194,66 @@ fun ArtistDetailScreen(
                     val songs = uiState.songs
                     val currentTopBarHeightDp = with(density) { topBarHeight.value.toDp() }
 
+                    val albumSections = uiState.albumSections
                     LazyColumn(
                         state = lazyListState,
-                        contentPadding = PaddingValues(top = currentTopBarHeightDp, bottom = 16.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        contentPadding = PaddingValues(
+                            top = currentTopBarHeightDp,
+                            bottom = MiniPlayerHeight + WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + 8.dp
+                        ),
                         modifier = Modifier
                             .fillMaxSize()
-                            .padding(horizontal = 16.dp)
+                            .padding(horizontal = 0.dp)
                     ) {
-                        items(songs, key = { song -> "artist_song_${song.id}" }) { song ->
-                            EnhancedSongListItem(
-                                song = song,
-                                isCurrentSong = songs.isNotEmpty() && stablePlayerState.currentSong == song,
-                                isPlaying = stablePlayerState.isPlaying,
-                                onMoreOptionsClick = {
-                                    playerViewModel.selectSongForInfo(song)
-                                    showSongInfoBottomSheet = true
-                                },
-                                onClick = { playerViewModel.showAndPlaySong(song, songs) }
-                            )
+                        albumSections.forEachIndexed { index, section ->
+                            if (section.songs.isEmpty()) return@forEachIndexed
+
+                            stickyHeader(key = "artist_album_${section.albumId}_${section.title}_header") {
+                                AlbumSectionHeader(
+                                    section = section,
+                                    onPlayAlbum = {
+                                        section.songs.firstOrNull()?.let { firstSong ->
+                                            playerViewModel.showAndPlaySong(firstSong, section.songs)
+                                        }
+                                    }
+                                )
+                            }
+
+                            item(key = "artist_album_${section.albumId}_${section.title}_header_spacing") {
+                                Spacer(modifier = Modifier.height(12.dp))
+                            }
+
+                            itemsIndexed(
+                                items = section.songs,
+                                key = { _, song -> "artist_album_${section.albumId}_song_${song.id}" }
+                            ) { songIndex, song ->
+                                EnhancedSongListItem(
+                                    modifier = Modifier.padding(horizontal = 16.dp),
+                                    song = song,
+                                    isCurrentSong = stablePlayerState.currentSong?.id == song.id,
+                                    isPlaying = stablePlayerState.isPlaying,
+                                    onMoreOptionsClick = {
+                                        playerViewModel.selectSongForInfo(song)
+                                        showSongInfoBottomSheet = true
+                                    },
+                                    onClick = { playerViewModel.showAndPlaySong(song, section.songs) }
+                                )
+
+                                if (songIndex != section.songs.lastIndex) {
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                }
+                            }
+
+                            item(key = "artist_album_${section.albumId}_${section.title}_footer_spacing") {
+                                Spacer(
+                                    modifier = Modifier.height(
+                                        if (index == albumSections.lastIndex) 24.dp else 20.dp
+                                    )
+                                )
+                            }
                         }
 
-                        item { Spacer(modifier = Modifier.height(MiniPlayerHeight + 16.dp)) }
+
                     }
 
                     CustomCollapsingTopBar(
@@ -229,6 +279,11 @@ fun ArtistDetailScreen(
         }.value ?: false
 
         if (currentSong != null) {
+            val removeFromListTrigger = remember(uiState.songs) {
+                {
+                    viewModel.removeSongFromAlbumSection(currentSong.id)
+                }
+            }
             SongInfoBottomSheet(
                 song = currentSong,
                 isFavorite = isFavorite,
@@ -244,6 +299,14 @@ fun ArtistDetailScreen(
                     playerViewModel.addSongToQueue(currentSong)
                     showSongInfoBottomSheet = false
                 },
+                onAddNextToQueue = {
+                    playerViewModel.addSongNextToQueue(currentSong)
+                    showSongInfoBottomSheet = false
+                },
+                onAddToPlayList = {
+                    showPlaylistBottomSheet = true;
+                },
+                onDeleteFromDevice = playerViewModel::deleteFromDevice,
                 onNavigateToAlbum = {
                     navController.navigate(Screen.AlbumDetail.createRoute(currentSong.albumId))
                     showSongInfoBottomSheet = false
@@ -252,17 +315,86 @@ fun ArtistDetailScreen(
                     navController.navigate(Screen.ArtistDetail.createRoute(currentSong.artistId))
                     showSongInfoBottomSheet = false
                 },
-                onEditSong = { newTitle, newArtist, newAlbum, newGenre, newLyrics, newTrackNumber ->
-                    playerViewModel.editSongMetadata(currentSong, newTitle, newArtist, newAlbum, newGenre, newLyrics, newTrackNumber)
+                onEditSong = { newTitle, newArtist, newAlbum, newGenre, newLyrics, newTrackNumber, coverArtUpdate ->
+                    playerViewModel.editSongMetadata(currentSong, newTitle, newArtist, newAlbum, newGenre, newLyrics, newTrackNumber, coverArtUpdate)
                 },
                 generateAiMetadata = { fields ->
                     playerViewModel.generateAiMetadata(currentSong, fields)
-                }
+                },
+                removeFromListTrigger = removeFromListTrigger
             )
+            if (showPlaylistBottomSheet) {
+                val playlistUiState by playlistViewModel.uiState.collectAsState()
+
+                PlaylistBottomSheet(
+                    playlistUiState = playlistUiState,
+                    song = currentSong,
+                    onDismiss = { showPlaylistBottomSheet = false },
+                    bottomBarHeight = bottomBarHeightDp,
+                    playerViewModel = playerViewModel,
+                )
+            }
         }
     }
 }
 
+@Composable
+private fun AlbumSectionHeader(
+    section: ArtistAlbumSection,
+    modifier: Modifier = Modifier,
+    onPlayAlbum: () -> Unit
+) {
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        color = Color.Transparent,
+        tonalElevation = 2.dp
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 12.dp, horizontal = 22.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = section.title,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                val subtitle = buildString {
+                    section.year?.takeIf { it > 0 }?.let {
+                        append(it.toString())
+                        append(" • ")
+                    }
+                    append("${section.songs.size} songs")
+                }
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            FilledIconButton(
+                onClick = onPlayAlbum,
+                colors = IconButtonDefaults.filledIconButtonColors(
+                    containerColor = MaterialTheme.colorScheme.tertiaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onTertiaryContainer
+                )
+            ) {
+                Icon(Icons.Rounded.PlayArrow, contentDescription = "Play ${section.title}")
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 private fun CustomCollapsingTopBar(
     artist: Artist,
@@ -273,7 +405,7 @@ private fun CustomCollapsingTopBar(
     onPlayClick: () -> Unit
 ) {
     val surfaceColor = MaterialTheme.colorScheme.surface
-    val statusBarColor = if (isSystemInDarkTheme()) Color.Black.copy(alpha = 0.6f) else Color.White.copy(alpha = 0.4f)
+    val statusBarColor = if (LocalPixelPlayDarkTheme.current) Color.Black.copy(alpha = 0.6f) else Color.White.copy(alpha = 0.4f)
 
     // --- Animation Values ---
     val fabScale = 1f - collapseFraction
@@ -302,18 +434,32 @@ private fun CustomCollapsingTopBar(
                 .fillMaxSize()
                 .graphicsLayer { alpha = headerContentAlpha }
         ) {
-            MusicIconPattern(
-                modifier = Modifier.fillMaxSize(),
-                collapseFraction = collapseFraction
-            )
+            // Artist artwork or fallback pattern
+            if (!artist.imageUrl.isNullOrEmpty()) {
+                AsyncImage(
+                    model = ImageRequest.Builder(LocalContext.current)
+                        .data(artist.imageUrl)
+                        .crossfade(true)
+                        .build(),
+                    contentDescription = artist.name,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else {
+                MusicIconPattern(
+                    modifier = Modifier.fillMaxSize(),
+                    collapseFraction = collapseFraction
+                )
+            }
 
+            // Gradient overlay for text readability
             Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .background(
                         Brush.verticalGradient(
                             colorStops = arrayOf(
-                                0.4f to Color.Transparent,
+                                0.3f to Color.Transparent,
                                 1f to MaterialTheme.colorScheme.surface
                             )
                         )
@@ -360,7 +506,10 @@ private fun CustomCollapsingTopBar(
                 ) {
                     Text(
                         text = artist.name,
-                        style = MaterialTheme.typography.headlineMedium,
+                        style = MaterialTheme.typography.headlineMedium.copy(
+                            fontSize = 26.sp,
+                            textGeometricTransform = TextGeometricTransform(scaleX = 1.2f),
+                        ),
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onSurface,
                         maxLines = titleMaxLines,
@@ -368,7 +517,7 @@ private fun CustomCollapsingTopBar(
                     )
 
                     Text(
-                        text = "$songsCount canciones",
+                        text = "$songsCount songs",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
@@ -378,7 +527,7 @@ private fun CustomCollapsingTopBar(
             }
 
             // Botón de Play
-            LargeFloatingActionButton(
+            LargeExtendedFloatingActionButton(
                 onClick = onPlayClick,
                 shape = RoundedStarShape(sides = 8, curve = 0.05, rotation = 0f),
                 modifier = Modifier

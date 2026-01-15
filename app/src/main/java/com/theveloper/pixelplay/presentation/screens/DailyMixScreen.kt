@@ -2,7 +2,6 @@ package com.theveloper.pixelplay.presentation.screens
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,7 +14,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
@@ -23,33 +21,21 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.rounded.ArrowBack
-import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material.icons.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Shuffle
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ContainedLoadingIndicator
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.FilledTonalButton
-import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
-import androidx.compose.material3.LargeFloatingActionButton
-import androidx.compose.material3.LargeTopAppBar
+import androidx.compose.material3.LargeExtendedFloatingActionButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.MediumFloatingActionButton
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBarDefaults
-import androidx.compose.material3.TopAppBarDefaults.topAppBarColors
-import androidx.compose.material3.rememberTopAppBarState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
@@ -63,11 +49,13 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import android.os.Trace // Import Trace
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.dp
@@ -77,10 +65,10 @@ import androidx.navigation.NavController
 import com.theveloper.pixelplay.R
 import com.theveloper.pixelplay.data.model.Song
 import com.theveloper.pixelplay.presentation.components.AiPlaylistSheet
-import com.theveloper.pixelplay.presentation.components.AlbumArtCollage
-import com.theveloper.pixelplay.presentation.components.DailyMixHeader
 import com.theveloper.pixelplay.presentation.components.DailyMixMenu
 import com.theveloper.pixelplay.presentation.components.MiniPlayerHeight
+import com.theveloper.pixelplay.presentation.components.NavBarContentHeight
+import com.theveloper.pixelplay.presentation.components.PlaylistBottomSheet
 import com.theveloper.pixelplay.presentation.components.SmartImage
 import com.theveloper.pixelplay.presentation.components.SongInfoBottomSheet
 import com.theveloper.pixelplay.presentation.components.threeShapeSwitch
@@ -88,28 +76,30 @@ import com.theveloper.pixelplay.presentation.navigation.Screen
 import com.theveloper.pixelplay.presentation.viewmodel.MainViewModel
 import com.theveloper.pixelplay.presentation.viewmodel.PlayerSheetState
 import com.theveloper.pixelplay.presentation.viewmodel.PlayerViewModel
+import com.theveloper.pixelplay.presentation.viewmodel.PlaylistViewModel
 import com.theveloper.pixelplay.utils.formatDuration
 import com.theveloper.pixelplay.utils.shapes.RoundedStarShape
 import kotlinx.collections.immutable.ImmutableList
-import kotlinx.collections.immutable.persistentListOf
-import kotlinx.collections.immutable.toImmutableList
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
-import racra.compose.smooth_corner_rect_library.AbsoluteSmoothCornerShape
 
 @androidx.annotation.OptIn(UnstableApi::class)
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun DailyMixScreen(
     mainViewModel: MainViewModel = hiltViewModel(),
+    playlistViewModel: PlaylistViewModel = hiltViewModel(),
     playerViewModel: PlayerViewModel,
-    navController: NavController
+    navController: NavController,
 ) {
     Trace.beginSection("DailyMixScreen.Composition")
     val dailyMixSongs: ImmutableList<Song> by playerViewModel.dailyMixSongs.collectAsState()
     val currentSongId by remember { playerViewModel.stablePlayerState.map { it.currentSong?.id }.distinctUntilChanged() }.collectAsState(initial = null)
     val isPlaying by remember { playerViewModel.stablePlayerState.map { it.isPlaying }.distinctUntilChanged() }.collectAsState(initial = false)
     val isShuffleEnabled by remember { playerViewModel.stablePlayerState.map { it.isShuffleEnabled }.distinctUntilChanged() }.collectAsState(initial = false)
-
+    val systemNavBarInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+    val bottomBarHeightDp = NavBarContentHeight + systemNavBarInset
+    var showPlaylistBottomSheet by remember { mutableStateOf(false) }
     val playerSheetState by playerViewModel.sheetState.collectAsState() // This is a simple enum, less critical but fine
     val stablePlayerState by playerViewModel.stablePlayerState.collectAsState()
     val favoriteSongIds by playerViewModel.favoriteSongIds.collectAsState()
@@ -124,7 +114,14 @@ fun DailyMixScreen(
     var showDailyMixMenu by remember { mutableStateOf(false) }
 
     if (showDailyMixMenu) {
-        DailyMixMenu(onDismiss = { showDailyMixMenu = false })
+        DailyMixMenu(
+            onDismiss = { showDailyMixMenu = false },
+            onApplyPrompt = { prompt ->
+                playerViewModel.regenerateDailyMixWithPrompt(prompt)
+                showDailyMixMenu = false
+            },
+            isLoading = isGeneratingAiPlaylist
+        )
     }
 
     if (showAiSheet) {
@@ -157,6 +154,11 @@ fun DailyMixScreen(
 
     if (showSongInfoSheet && selectedSongForInfo != null) {
         val song = selectedSongForInfo!!
+        val removeFromListTrigger = remember(dailyMixSongs) {
+            {
+                playerViewModel.removeFromDailyMix(song.id)
+            }
+        }
         SongInfoBottomSheet(
             song = song,
             isFavorite = favoriteSongIds.contains(song.id),
@@ -170,6 +172,14 @@ fun DailyMixScreen(
                 playerViewModel.addSongToQueue(song)
                 showSongInfoSheet = false
             },
+            onAddNextToQueue = {
+                playerViewModel.addSongNextToQueue(song)
+                showSongInfoSheet = false
+            },
+            onAddToPlayList = {
+                    showPlaylistBottomSheet = true;
+            },
+            onDeleteFromDevice = playerViewModel::deleteFromDevice,
             onNavigateToAlbum = {
                 // Assuming Screen object has a method to create a route
                 navController.navigate(Screen.AlbumDetail.createRoute(song.albumId))
@@ -179,13 +189,26 @@ fun DailyMixScreen(
                 // TODO: Implement navigation to artist screen. Might require finding artist by name.
                 showSongInfoSheet = false
             },
-            onEditSong = { newTitle, newArtist, newAlbum, newGenre, newLyrics, newTrackNumber ->
-                playerViewModel.editSongMetadata(song, newTitle, newArtist, newAlbum, newGenre, newLyrics, newTrackNumber)
+            onEditSong = { newTitle, newArtist, newAlbum, newGenre, newLyrics, newTrackNumber, coverArtUpdate ->
+                playerViewModel.editSongMetadata(song, newTitle, newArtist, newAlbum, newGenre, newLyrics, newTrackNumber, coverArtUpdate)
             },
             generateAiMetadata = { fields ->
                 playerViewModel.generateAiMetadata(song, fields)
-            }
+            },
+            removeFromListTrigger = removeFromListTrigger
         )
+
+        if (showPlaylistBottomSheet) {
+            val playlistUiState by playlistViewModel.uiState.collectAsState()
+
+            PlaylistBottomSheet(
+                playlistUiState = playlistUiState,
+                song = song,
+                onDismiss = { showPlaylistBottomSheet = false },
+                bottomBarHeight = bottomBarHeightDp,
+                playerViewModel = playerViewModel,
+            )
+        }
     }
 
 
@@ -199,16 +222,16 @@ fun DailyMixScreen(
                 modifier = Modifier.fillMaxSize(),
                 contentAlignment = Alignment.Center
             ) {
-                CircularProgressIndicator()
+                ContainedLoadingIndicator()
             }
         } else {
             LazyColumn(
                 state = lazyListState,
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(bottom = MiniPlayerHeight + 38.dp),
+                contentPadding = PaddingValues(bottom = MiniPlayerHeight + WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + 8.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                item {
+                item(key = "daily_mix_header") {
                     ExpressiveDailyMixHeader(
                         songs = dailyMixSongs,
                         scrollState = lazyListState,
@@ -216,12 +239,12 @@ fun DailyMixScreen(
                     )
                 }
 
-                item {
+                item(key = "play_shuffle_buttons") {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(76.dp)
-                            .padding(horizontal = 20.dp, vertical = 12.dp),
+                            .padding(horizontal = 20.dp, vertical = 8.dp),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Button(
@@ -250,8 +273,10 @@ fun DailyMixScreen(
                         FilledTonalButton(
                             onClick = {
                                 if (dailyMixSongs.isNotEmpty()) {
-                                    if (!isShuffleEnabled) playerViewModel.toggleShuffle() // Activar shuffle si no estaba activo
-                                    playerViewModel.playSongs(dailyMixSongs, dailyMixSongs.random(), "Daily Mix")
+                                    playerViewModel.playSongsShuffled(
+                                        songsToPlay = dailyMixSongs,
+                                        queueName = "Daily Mix"
+                                    )
                                 }
                             },
                             modifier = Modifier
@@ -278,7 +303,7 @@ fun DailyMixScreen(
                         modifier = Modifier
                             .padding(horizontal = 16.dp),
                         song = song,
-                        isCurrentSong = dailyMixSongs.isNotEmpty() && stablePlayerState.currentSong == song,
+                        isCurrentSong = stablePlayerState.currentSong?.id == song.id,
                         isPlaying = currentSongId == song.id && isPlaying,
                         onClick = { playerViewModel.showAndPlaySong(song, dailyMixSongs, "Daily Mix", isVoluntaryPlay = false) },
                         onMoreOptionsClick = {
@@ -493,7 +518,7 @@ private fun ExpressiveDailyMixHeader(
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f)
                 )
             }
-            LargeFloatingActionButton(
+            LargeExtendedFloatingActionButton(
                 modifier = Modifier,
                 onClick = onShowMenu,
                 shape = RoundedStarShape(

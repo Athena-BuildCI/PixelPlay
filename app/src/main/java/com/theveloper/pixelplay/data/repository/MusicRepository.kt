@@ -78,6 +78,13 @@ interface MusicRepository {
     fun getSongsByIds(songIds: List<String>): Flow<List<Song>>
 
     /**
+     * Obtiene una canción por su ruta de archivo.
+     * @param path Ruta del archivo.
+     * @return El objeto Song o null si no se encuentra.
+     */
+    suspend fun getSongByPath(path: String): Song?
+
+    /**
      * Obtiene todos los directorios únicos que contienen archivos de audio.
      * Esto se usa principalmente para la configuración inicial de directorios.
      * También gestiona el guardado inicial de directorios permitidos si es la primera vez.
@@ -122,6 +129,7 @@ interface MusicRepository {
      */
     fun getSong(songId: String): Flow<Song?>
     fun getArtistById(artistId: Long): Flow<Artist?>
+    fun getArtistsForSong(songId: Long): Flow<List<Artist>>
 
     /**
      * Obtiene la lista de géneros, ya sea mockeados o leídos de los metadatos.
@@ -133,5 +141,20 @@ interface MusicRepository {
 
     suspend fun getLyricsFromRemote(song: Song): Result<Pair<Lyrics, String>>
 
+    /**
+     * Search for lyrics remotely, less specific than `getLyricsFromRemote` but more lenient
+     * @param song The song to search lyrics for
+     * @return The search query and the results
+     */
+    suspend fun searchRemoteLyrics(song: Song): Result<Pair<String, List<LyricsSearchResult>>>
+
     suspend fun updateLyrics(songId: Long, lyrics: String)
+
+    suspend fun resetLyrics(songId: Long)
+
+    suspend fun resetAllLyrics()
+
+    fun getMusicFolders(): Flow<List<com.theveloper.pixelplay.data.model.MusicFolder>>
+
+    suspend fun deleteById(id: Long)
 }

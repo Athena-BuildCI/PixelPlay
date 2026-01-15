@@ -5,7 +5,10 @@ import androidx.room.Entity
 import androidx.room.ForeignKey
 import androidx.room.Index
 import androidx.room.PrimaryKey
+import com.theveloper.pixelplay.data.model.ArtistRef
 import com.theveloper.pixelplay.data.model.Song
+import com.theveloper.pixelplay.utils.normalizeMetadataText
+import com.theveloper.pixelplay.utils.normalizeMetadataTextOrEmpty
 
 @Entity(
     tableName = "songs",
@@ -37,8 +40,9 @@ import com.theveloper.pixelplay.data.model.Song
 data class SongEntity(
     @PrimaryKey val id: Long,
     @ColumnInfo(name = "title") val title: String,
-    @ColumnInfo(name = "artist_name") val artistName: String,
-    @ColumnInfo(name = "artist_id") val artistId: Long, // index = true eliminado
+    @ColumnInfo(name = "artist_name") val artistName: String, // Display string (combined or primary)
+    @ColumnInfo(name = "artist_id") val artistId: Long, // Primary artist ID for backward compatibility
+    @ColumnInfo(name = "album_artist") val albumArtist: String? = null, // Album artist from metadata
     @ColumnInfo(name = "album_name") val albumName: String,
     @ColumnInfo(name = "album_id") val albumId: Long, // index = true eliminado
     @ColumnInfo(name = "content_uri_string") val contentUriString: String,
@@ -49,25 +53,76 @@ data class SongEntity(
     @ColumnInfo(name = "parent_directory_path") val parentDirectoryPath: String, // Added for directory filtering
     @ColumnInfo(name = "is_favorite", defaultValue = "0") val isFavorite: Boolean = false,
     @ColumnInfo(name = "lyrics", defaultValue = "null") val lyrics: String? = null,
-    @ColumnInfo(name = "track_number", defaultValue = "0") val trackNumber: Int = 0
+    @ColumnInfo(name = "track_number", defaultValue = "0") val trackNumber: Int = 0,
+    @ColumnInfo(name = "year", defaultValue = "0") val year: Int = 0,
+    @ColumnInfo(name = "date_added", defaultValue = "0") val dateAdded: Long = System.currentTimeMillis(),
+    @ColumnInfo(name = "mime_type") val mimeType: String? = null,
+    @ColumnInfo(name = "bitrate") val bitrate: Int? = null, // bits per second
+    @ColumnInfo(name = "sample_rate") val sampleRate: Int? = null // Hz
 )
 
 fun SongEntity.toSong(): Song {
     return Song(
-        id = this.id.toString(), // El modelo Song usa ID como String
-        title = this.title,
-        artist = this.artistName,
+        id = this.id.toString(),
+        title = this.title.normalizeMetadataTextOrEmpty(),
+        artist = this.artistName.normalizeMetadataTextOrEmpty(),
         artistId = this.artistId,
-        album = this.albumName,
+        artists = emptyList(), // Will be populated from junction table when needed
+        album = this.albumName.normalizeMetadataTextOrEmpty(),
         albumId = this.albumId,
+        albumArtist = this.albumArtist?.normalizeMetadataText(),
+        path = this.filePath, // Map the file path
         contentUriString = this.contentUriString,
         albumArtUriString = this.albumArtUriString,
         duration = this.duration,
-        genre = this.genre,
-        lyrics = this.lyrics,
+        genre = this.genre.normalizeMetadataText(),
+        lyrics = this.lyrics?.normalizeMetadataText(),
         isFavorite = this.isFavorite,
-        trackNumber = this.trackNumber
-        // filePath no está en el modelo Song, se usa internamente en el repo o SSoT
+        trackNumber = this.trackNumber,
+        dateAdded = this.dateAdded,
+        year = this.year,
+        mimeType = this.mimeType,
+        bitrate = this.bitrate,
+        sampleRate = this.sampleRate
+    )
+}
+
+/**
+ * Converts a SongEntity to Song with artists from the junction table.
+ */
+fun SongEntity.toSongWithArtistRefs(artists: List<ArtistEntity>, crossRefs: List<SongArtistCrossRef>): Song {
+    val crossRefByArtistId = crossRefs.associateBy { it.artistId }
+    val artistRefs = artists.map { artist ->
+        val crossRef = crossRefByArtistId[artist.id]
+        ArtistRef(
+            id = artist.id,
+            name = artist.name.normalizeMetadataTextOrEmpty(),
+            isPrimary = crossRef?.isPrimary ?: false
+        )
+    }.sortedByDescending { it.isPrimary }
+    
+    return Song(
+        id = this.id.toString(),
+        title = this.title.normalizeMetadataTextOrEmpty(),
+        artist = this.artistName.normalizeMetadataTextOrEmpty(),
+        artistId = this.artistId,
+        artists = artistRefs,
+        album = this.albumName.normalizeMetadataTextOrEmpty(),
+        albumId = this.albumId,
+        albumArtist = this.albumArtist?.normalizeMetadataText(),
+        path = this.filePath,
+        contentUriString = this.contentUriString,
+        albumArtUriString = this.albumArtUriString,
+        duration = this.duration,
+        genre = this.genre.normalizeMetadataText(),
+        lyrics = this.lyrics?.normalizeMetadataText(),
+        isFavorite = this.isFavorite,
+        trackNumber = this.trackNumber,
+        dateAdded = this.dateAdded,
+        year = this.year,
+        mimeType = this.mimeType,
+        bitrate = this.bitrate,
+        sampleRate = this.sampleRate
     )
 }
 
@@ -84,6 +139,7 @@ fun Song.toEntity(filePathFromMediaStore: String, parentDirFromMediaStore: Strin
         title = this.title,
         artistName = this.artist,
         artistId = this.artistId,
+        albumArtist = this.albumArtist,
         albumName = this.album,
         albumId = this.albumId,
         contentUriString = this.contentUriString,
@@ -92,7 +148,12 @@ fun Song.toEntity(filePathFromMediaStore: String, parentDirFromMediaStore: Strin
         genre = this.genre,
         lyrics = this.lyrics,
         filePath = filePathFromMediaStore,
-        parentDirectoryPath = parentDirFromMediaStore
+        parentDirectoryPath = parentDirFromMediaStore,
+        dateAdded = this.dateAdded,
+        year = this.year,
+        mimeType = this.mimeType,
+        bitrate = this.bitrate,
+        sampleRate = this.sampleRate
     )
 }
 
@@ -104,6 +165,7 @@ fun Song.toEntityWithoutPaths(): SongEntity {
         title = this.title,
         artistName = this.artist,
         artistId = this.artistId,
+        albumArtist = this.albumArtist,
         albumName = this.album,
         albumId = this.albumId,
         contentUriString = this.contentUriString,
@@ -112,6 +174,11 @@ fun Song.toEntityWithoutPaths(): SongEntity {
         genre = this.genre,
         lyrics = this.lyrics,
         filePath = "", // Default o manejar como no disponible
-        parentDirectoryPath = "" // Default o manejar como no disponible
+        parentDirectoryPath = "", // Default o manejar como no disponible
+        dateAdded = this.dateAdded,
+        year = this.year,
+        mimeType = this.mimeType,
+        bitrate = this.bitrate,
+        sampleRate = this.sampleRate
     )
 }

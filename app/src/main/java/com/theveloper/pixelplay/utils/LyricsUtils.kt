@@ -37,6 +37,7 @@ import com.theveloper.pixelplay.data.model.Lyrics
 import com.theveloper.pixelplay.data.model.SyncedLine
 import com.theveloper.pixelplay.data.model.SyncedWord
 import kotlinx.coroutines.flow.Flow
+import java.lang.Character
 import java.util.regex.Pattern
 import kotlin.math.PI
 import kotlin.math.max
@@ -46,6 +47,9 @@ object LyricsUtils {
 
     private val LRC_LINE_REGEX = Pattern.compile("^\\[(\\d{2}):(\\d{2})\\.(\\d{2,3})](.*)$")
     private val LRC_WORD_REGEX = Pattern.compile("<(\\d{2}):(\\d{2})\\.(\\d{2,3})>([^<]*)")
+    private val LRC_WORD_TAG_REGEX = Regex("<\\d{2}:\\d{2}\\.\\d{2,3}>")
+    private val LRC_WORD_SPLIT_REGEX = Regex("(?=<\\d{2}:\\d{2}\\.\\d{2,3}>)")
+    private val LRC_TIMESTAMP_TAG_REGEX = Regex("\\[\\d{1,2}:\\d{2}(?:\\.\\d{1,3})?]")
 
     /**
      * Parsea un String que contiene una letra en formato LRC o texto plano.
@@ -61,22 +65,26 @@ object LyricsUtils {
         val plainLines = mutableListOf<String>()
         var isSynced = false
 
-        lyricsText.lines().forEach { line ->
+        lyricsText.lines().forEach { rawLine ->
+            val line = sanitizeLrcLine(rawLine)
+            if (line.isEmpty()) return@forEach
+
             val lineMatcher = LRC_LINE_REGEX.matcher(line)
             if (lineMatcher.matches()) {
                 isSynced = true
                 val minutes = lineMatcher.group(1)?.toLong() ?: 0
                 val seconds = lineMatcher.group(2)?.toLong() ?: 0
                 val fraction = lineMatcher.group(3)?.toLong() ?: 0
-                val text = lineMatcher.group(4)?.trim() ?: ""
+                val textWithTags = stripFormatCharacters(lineMatcher.group(4)?.trim() ?: "")
+                val text = stripLrcTimestamps(textWithTags)
 
                 val millis = if (lineMatcher.group(3)?.length == 2) fraction * 10 else fraction
                 val lineTimestamp = minutes * 60 * 1000 + seconds * 1000 + millis
 
                 // Enhanced word-by-word parsing
-                if (text.contains(Regex("<\\d{2}:\\d{2}\\.\\d{2,3}>"))) {
+                if (text.contains(LRC_WORD_TAG_REGEX)) {
                     val words = mutableListOf<SyncedWord>()
-                    val parts = text.split(Regex("(?=<\\d{2}:\\d{2}\\.\\d{2,3}>)"))
+                    val parts = text.split(LRC_WORD_SPLIT_REGEX)
 
                     for (part in parts) {
                         if (part.isEmpty()) continue
@@ -85,7 +93,7 @@ object LyricsUtils {
                             val wordMinutes = wordMatcher.group(1)?.toLong() ?: 0
                             val wordSeconds = wordMatcher.group(2)?.toLong() ?: 0
                             val wordFraction = wordMatcher.group(3)?.toLong() ?: 0
-                            val wordText = wordMatcher.group(4) ?: ""
+                            val wordText = stripFormatCharacters(wordMatcher.group(4) ?: "")
                             val wordMillis = if (wordMatcher.group(3)?.length == 2) wordFraction * 10 else wordFraction
                             val wordTimestamp = wordMinutes * 60 * 1000 + wordSeconds * 1000 + wordMillis
                             words.add(SyncedWord(wordTimestamp.toInt(), wordText))
@@ -99,14 +107,38 @@ object LyricsUtils {
                     if (words.isNotEmpty()) {
                         val fullLineText = words.joinToString("") { it.word }
                         syncedLines.add(SyncedLine(lineTimestamp.toInt(), fullLineText, words))
-                    } else if (text.isNotEmpty()) {
+                    } else {
                         syncedLines.add(SyncedLine(lineTimestamp.toInt(), text))
                     }
-                } else if (text.isNotEmpty()) {
+                } else {
                     syncedLines.add(SyncedLine(lineTimestamp.toInt(), text))
                 }
             } else {
-                plainLines.add(line)
+                // línea SIN timestamp
+                val stripped = stripLrcTimestamps(stripFormatCharacters(line))
+                // Si ya detectamos que el archivo tiene sincronización y ya existe
+                // al menos una SyncedLine, tratamos esta línea como continuación
+                // de la anterior
+                if (isSynced && syncedLines.isNotEmpty()) {
+                    val last = syncedLines.removeAt(syncedLines.lastIndex)
+                    // Mantenemos el texto previo y añadimos la nueva línea con un salto de línea.
+                    val mergedLineText = if (last.line.isEmpty()) {
+                        stripped
+                    } else {
+                        last.line + "\n" + stripped
+                    }
+                    // Conservamos la lista de palabras sincronizadas si existía.
+                    val merged = if (last.words?.isNotEmpty() == true) {
+                        SyncedLine(last.time, mergedLineText, last.words)
+                    } else {
+                        SyncedLine(last.time, mergedLineText)
+                    }
+
+                    syncedLines.add(merged)
+                } else {
+                    // Si no hay sincronización en el archivo, es texto plano
+                    plainLines.add(stripped)
+                }
             }
         }
 
@@ -118,6 +150,88 @@ object LyricsUtils {
             Lyrics(plain = plainLines)
         }
     }
+
+    internal fun stripLrcTimestamps(value: String): String {
+        if (value.isEmpty()) return value
+        val withoutTags = LRC_TIMESTAMP_TAG_REGEX.replace(value, "")
+        return withoutTags.trimStart()
+    }
+
+    /**
+     * Converts synced lyrics to LRC format string.
+     * Each line is formatted as [mm:ss.xx]text
+     * @param syncedLines The list of synced lines to convert.
+     * @return A string in LRC format.
+     */
+    fun syncedToLrcString(syncedLines: List<SyncedLine>): String {
+        return syncedLines.sortedBy { it.time }.joinToString("\n") { line ->
+            val totalMs = line.time
+            val minutes = totalMs / 60000
+            val seconds = (totalMs % 60000) / 1000
+            val hundredths = (totalMs % 1000) / 10
+            "[%02d:%02d.%02d]%s".format(minutes, seconds, hundredths, line.line)
+        }
+    }
+
+    /**
+     * Converts plain lyrics (list of lines) to a plain text string.
+     * @param plainLines The list of plain text lines.
+     * @return A string with each line separated by newline.
+     */
+    fun plainToString(plainLines: List<String>): String {
+        return plainLines.joinToString("\n")
+    }
+
+    /**
+     * Converts Lyrics object to LRC or plain text format based on available data.
+     * Prefers synced lyrics if available.
+     * @param lyrics The Lyrics object to convert.
+     * @param preferSynced Whether to prefer synced lyrics over plain. Default true.
+     * @return A string representation of the lyrics.
+     */
+    fun toLrcString(lyrics: Lyrics, preferSynced: Boolean = true): String {
+        return if (preferSynced && !lyrics.synced.isNullOrEmpty()) {
+            syncedToLrcString(lyrics.synced)
+        } else if (!lyrics.plain.isNullOrEmpty()) {
+            plainToString(lyrics.plain)
+        } else if (!lyrics.synced.isNullOrEmpty()) {
+            syncedToLrcString(lyrics.synced)
+        } else {
+            ""
+        }
+    }
+}
+
+private fun sanitizeLrcLine(rawLine: String): String {
+    if (rawLine.isEmpty()) return rawLine
+
+    val withoutTerminators = rawLine
+        .trimEnd('\r', '\n')
+        .filterNot { char ->
+            Character.getType(char).toByte() == Character.FORMAT ||
+                (Character.isISOControl(char) && char != '\t')
+        }
+        .trimEnd('\uFEFF')
+
+    val trimmedPrefix = withoutTerminators.trimStart { it.isWhitespace() }
+    val firstBracket = trimmedPrefix.indexOf('[')
+    return if (firstBracket > 0) {
+        trimmedPrefix.substring(firstBracket)
+    } else {
+        trimmedPrefix
+    }
+}
+
+private fun stripFormatCharacters(value: String): String {
+    val cleaned = value.filterNot { char ->
+        Character.getType(char).toByte() == Character.FORMAT ||
+            (Character.isISOControl(char) && char != '\t')
+    }
+
+    return when (cleaned) {
+        "\"", "'" -> ""
+        else -> cleaned
+    }
 }
 
 @Composable
@@ -125,20 +239,27 @@ fun ProviderText(
     providerText: String,
     uri: String,
     modifier: Modifier = Modifier,
-    textAlign: TextAlign? = null
+    textAlign: TextAlign? = null,
+    accentColor: Color? = null
 ) {
     val uriHandler = LocalUriHandler.current
+    val linkColor = accentColor ?: MaterialTheme.colorScheme.primary
+    val textColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
     val annotatedString = buildAnnotatedString {
-        append(providerText)
+        withStyle(style = SpanStyle(color = textColor)) {
+            append(providerText)
+        }
         pushStringAnnotation(tag = "URL", annotation = uri)
-        withStyle(style = SpanStyle(color = MaterialTheme.colorScheme.primary)) {
+        withStyle(style = SpanStyle(color = linkColor)) {
             append(" LRCLIB")
         }
         pop()
     }
 
-    textAlign?.let { MaterialTheme.typography.bodySmall.copy(textAlign = it) }?.let {
-        ClickableText(
+    val baseStyle = MaterialTheme.typography.bodySmall
+    val finalStyle = textAlign?.let { baseStyle.copy(textAlign = it) } ?: baseStyle
+    
+    ClickableText(
         text = annotatedString,
         onClick = { offset ->
             annotatedString.getStringAnnotations(tag = "URL", start = offset, end = offset)
@@ -146,10 +267,9 @@ fun ProviderText(
                     uriHandler.openUri(annotation.item)
                 }
         },
-        style = it,
+        style = finalStyle,
         modifier = modifier
     )
-    }
 }
 
 /**

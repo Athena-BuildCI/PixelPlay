@@ -1,9 +1,11 @@
 package com.theveloper.pixelplay.presentation.screens
 
+import android.R.id.icon
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import androidx.activity.compose.BackHandler
 import androidx.annotation.DrawableRes
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -19,30 +21,33 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
@@ -52,14 +57,21 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.lerp
 import androidx.compose.ui.util.lerp
+import androidx.core.graphics.drawable.toBitmap
+import androidx.core.net.toUri
 import androidx.navigation.NavController
+import coil.compose.AsyncImagePainter
+import coil.request.ImageRequest
+import coil.size.Size
 import com.theveloper.pixelplay.R
+import com.theveloper.pixelplay.data.github.GitHubContributorService
+import com.theveloper.pixelplay.presentation.components.MiniPlayerHeight
+import com.theveloper.pixelplay.presentation.components.SmartImage
+import com.theveloper.pixelplay.presentation.components.brickbreaker.BrickBreakerOverlay
 import kotlinx.coroutines.launch
 import racra.compose.smooth_corner_rect_library.AbsoluteSmoothCornerShape
+import timber.log.Timber
 import kotlin.math.roundToInt
-import androidx.core.net.toUri
-import coil.compose.AsyncImage
-import coil.request.ImageRequest
 
 // Data class to hold information about each person in the acknowledgements section
 data class Contributor(
@@ -102,7 +114,7 @@ private fun AboutTopBar(
                 onClick = onBackPressed,
                 colors = IconButtonDefaults.filledIconButtonColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)
             ) {
-                Icon(painterResource(R.drawable.rounded_arrow_back_24), contentDescription = "Back")
+                Icon(painterResource(R.drawable.rounded_arrow_back_24), contentDescription = "Back", tint = MaterialTheme.colorScheme.onSurface)
             }
 
             Box(
@@ -134,23 +146,54 @@ private fun AboutTopBar(
 @Composable
 fun AboutScreen(
     navController: NavController,
+    viewModel: com.theveloper.pixelplay.presentation.viewmodel.PlayerViewModel,
     onNavigationIconClick: () -> Unit
 ) {
     val context = LocalContext.current
+    // ... existing version name logic ...
     val versionName = try {
         val packageInfo = context.packageManager.getPackageInfo(context.packageName, 0)
         packageInfo.versionName
     } catch (e: Exception) {
         "N/A"
     }
-
+    // ... existing code ...
     val authors = listOf(
         Contributor(name = "Theo Vilardo", githubUrl = "https://github.com/theovilardo", telegramUrl = "https://t.me/thevelopersupport", avatarUrl = "https://avatars.githubusercontent.com/u/26845343?v=4"),
     )
 
-    val contributors = listOf(
-        Contributor(name = "Colby Cabrera", githubUrl = "https://github.com/ColbyCabrera", avatarUrl = "https://avatars.githubusercontent.com/u/77089439?v=4")
-    )
+    // State to hold fetched contributors
+    var contributors by remember { mutableStateOf<List<Contributor>>(emptyList()) }
+    var isLoadingContributors by remember { mutableStateOf(true) }
+
+    val githubService = remember { GitHubContributorService() }
+
+    // Fetch contributors from GitHub API
+    LaunchedEffect(Unit) {
+        try {
+            val result = githubService.fetchContributors()
+            result.onSuccess { githubContributors ->
+                // Convert GitHub contributors to our Contributor model
+                contributors = githubContributors
+                    .filter { it.login != "theovilardo" } // Remove author from contributors list
+                    .map { github ->
+                        Contributor(
+                            name = github.login,
+                            role = "",
+                            avatarUrl = github.avatar_url,
+                            githubUrl = github.html_url
+                        )
+                    }
+            }
+            result.onFailure { exception ->
+                Timber.e(exception, "Failed to fetch contributors from GitHub")
+                // Fall back to empty list if fetch fails
+                contributors = emptyList()
+            }
+        } finally {
+            isLoadingContributors = false
+        }
+    }
 
     // Correctly initialize MutableTransitionState
     val transitionState = remember { MutableTransitionState(false) }
@@ -228,6 +271,10 @@ fun AboutScreen(
         }
     }
 
+    var showBrickBreaker by remember { mutableStateOf(false) }
+    val stablePlayerState by viewModel.stablePlayerState.collectAsState()
+    val currentSong = stablePlayerState.currentSong
+
     Box(
         modifier = Modifier
             .nestedScroll(nestedScrollConnection)
@@ -240,12 +287,15 @@ fun AboutScreen(
         val currentTopBarHeightDp = with(density) { topBarHeight.value.toDp() }
         LazyColumn(
             state = lazyListState,
-            contentPadding = PaddingValues(top = currentTopBarHeightDp, bottom = 16.dp),
+            contentPadding = PaddingValues(
+                top = currentTopBarHeightDp,
+                bottom = MiniPlayerHeight + WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + 8.dp
+            ),
             modifier = Modifier.fillMaxSize(),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             // App info section
-            item {
+            item(key = "app_info_header") {
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     modifier = Modifier.padding(top = 32.dp, bottom = 24.dp)
@@ -264,16 +314,25 @@ fun AboutScreen(
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
                         Text(
-                            text = "Pixel Play",
+                            text = "PixelPlayer",
                             style = MaterialTheme.typography.headlineSmall,
                             fontWeight = FontWeight.Bold
                         )
+                        val haptic = LocalHapticFeedback.current
                         Box(
                             modifier = Modifier
                                 .background(
                                     shape = CircleShape,
                                     color = MaterialTheme.colorScheme.tertiaryContainer
                                 )
+                                .pointerInput(Unit) {
+                                    detectTapGestures(
+                                        onLongPress = {
+                                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                            showBrickBreaker = true
+                                        }
+                                    )
+                                }
                         ) {
                             Text(
                                 modifier = Modifier.padding(vertical = 8.dp, horizontal = 12.dp),
@@ -287,7 +346,7 @@ fun AboutScreen(
             }
 
             // Greeting section
-            item {
+            item(key = "greeting_card") {
                 Surface(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -301,9 +360,10 @@ fun AboutScreen(
                             .padding(horizontal = 24.dp, vertical = 20.dp)
                     ) {
                         Text(
-                            text = "Thanks for using Pixel Play!",
+                            text = "Thanks for using PixelPlayer!",
                             style = MaterialTheme.typography.titleLarge,
                             fontWeight = FontWeight.Bold,
+                            textAlign = TextAlign.Center,
                             modifier = Modifier.padding(bottom = 8.dp)
                         )
                         Text(
@@ -316,7 +376,7 @@ fun AboutScreen(
             }
 
             // Author section
-            item {
+            item(key = "author_header") {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -331,16 +391,16 @@ fun AboutScreen(
                 }
             }
 
-            item{
+            item(key = authors[0].name) {
                 ContributorCard(authors[0])
             }
 
-            item {
+            item(key = "author_contributor_spacer") {
                 Spacer(modifier = Modifier.height(12.dp))
             }
 
             // Contributors section
-            item {
+            item(key = "contributors_header") {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -355,8 +415,24 @@ fun AboutScreen(
                 }
             }
 
-            items(contributors) { contributor ->
-                ContributorCard(contributor)
+            if (isLoadingContributors) {
+                item(key = "contributors_loading") {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 32.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        CircularProgressIndicator()
+                    }
+                }
+            } else {
+                items(
+                    items = contributors,
+                    key = { it.name }
+                ) { contributor ->
+                    ContributorCard(contributor)
+                }
             }
         }
         AboutTopBar(
@@ -364,6 +440,15 @@ fun AboutScreen(
             headerHeight = currentTopBarHeightDp,
             onBackPressed = onNavigationIconClick
         )
+
+        if (showBrickBreaker) {
+            BackHandler { showBrickBreaker = false }
+            BrickBreakerOverlay(
+                isMiniPlayerVisible = currentSong != null,
+                onPlayRandom = { viewModel.playRandomSong() },
+                onClose = { showBrickBreaker = false }
+            )
+        }
     }
 }
 
@@ -472,47 +557,79 @@ private fun ContributorAvatar(
     @DrawableRes iconRes: Int?,
     modifier: Modifier = Modifier
 ) {
-    val bg = MaterialTheme.colorScheme.secondaryContainer
-    val fg = MaterialTheme.colorScheme.onSecondaryContainer
+    val containerColor = MaterialTheme.colorScheme.surfaceContainerHigh
+    val iconTint = MaterialTheme.colorScheme.onSurfaceVariant
+    val letterBackground = MaterialTheme.colorScheme.surfaceContainerHighest
+    val letterTint = MaterialTheme.colorScheme.onSurfaceVariant
     val initial = name.firstOrNull()?.uppercase() ?: "?"
+    var cachedBitmap by remember(avatarUrl) { mutableStateOf<ImageBitmap?>(null) }
 
     Surface(
         modifier = modifier.size(48.dp),
         shape = CircleShape,
-        color = bg,
+        color = containerColor,
         tonalElevation = 3.dp,
     ) {
         when {
+            cachedBitmap != null -> {
+                Image(
+                    bitmap = cachedBitmap!!,
+                    contentDescription = "Avatar de $name",
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop
+                )
+            }
             !avatarUrl.isNullOrBlank() -> {
-                // Coil AsyncImage; if you don't use Coil, swap this for your own image loader
-                AsyncImage(
+                SmartImage(
                     model = ImageRequest.Builder(LocalContext.current)
                         .data(avatarUrl)
                         .crossfade(true)
                         .build(),
                     contentDescription = "Avatar de $name",
-                    contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize(),
-                    error = painterResource(id = iconRes ?: 0).takeIf { iconRes != null },
-                    placeholder = painterResource(id = iconRes ?: 0).takeIf { iconRes != null }
+                    shape = CircleShape,
+                    contentScale = ContentScale.Crop,
+                    placeholderResId = iconRes ?: R.drawable.ic_music_placeholder,
+                    errorResId = R.drawable.rounded_broken_image_24,
+                    targetSize = Size(96, 96),
+                    onState = { state ->
+                        if (state is AsyncImagePainter.State.Success) {
+                            val drawable = state.result.drawable
+                            val bitmap = drawable?.toBitmap()?.asImageBitmap()
+                            if (bitmap != null) {
+                                cachedBitmap = bitmap
+                            }
+                        }
+                    }
                 )
             }
             iconRes != null -> {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Image(
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .background(letterBackground),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
                         painter = painterResource(iconRes),
                         contentDescription = "Icono de $name",
+                        tint = iconTint,
                         modifier = Modifier.size(28.dp)
                     )
                 }
             }
             else -> {
                 // Letter tile fallback
-                Box(Modifier.fillMaxSize().background(bg), contentAlignment = Alignment.Center) {
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .background(letterBackground),
+                    contentAlignment = Alignment.Center
+                ) {
                     Text(
                         text = initial.toString(),
                         style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                        color = fg
+                        color = letterTint
                     )
                 }
             }
