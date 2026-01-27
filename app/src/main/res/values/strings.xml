@@ -17,6 +17,7 @@
     <string name="all_files_access_setting">All Files Access</string>
     <string name="lyrics_not_found">Lyrics not found</string>
     <string name="search_lyrics_online_prompt">Would you like to search for lyrics online?</string>
+    <string name="custom_search_hint">We couldn’t find lyrics automatically. You can edit the title or artist and try searching manually.</string>
     <string name="failed_to_search_for_lyrics">Failed to search for lyrics</string>
     <string name="failed_to_fetch_lyrics_from_remote">Failed to fetch lyrics from remote</string>
     <string name="lyrics_fetch_timeout">Connection timed out. Please check your internet connection.</string>
@@ -69,9 +70,29 @@
     <string name="lyrics_earlier">Earlier</string>
     <string name="lyrics_later">Later</string>
 
+    <!-- AI Playlist -->
+    <string name="ai_error_api_key">Please configure your Gemini API Key in Settings.</string>
+    <string name="ai_error_generic">AI Error: %s</string>
+    <string name="ai_no_songs_found">AI couldn\'t find any songs for your prompt.</string>
+    <string name="ai_prompt_empty">Write an idea for your Daily Mix</string>
+    <string name="ai_daily_mix_updated">Daily Mix updated with AI</string>
+    <string name="ai_no_songs_for_mix">AI couldn\'t find songs for this mix</string>
+
     <!-- Launcher Shortcuts -->
     <string name="shortcut_shuffle_short">Shuffle</string>
     <string name="shortcut_shuffle_long">Shuffle all songs</string>
     <string name="shortcut_playlist_short">Playlist</string>
     <string name="shortcut_playlist_long">Last played playlist</string>
+
+    <!-- Errors -->
+    <string name="invalid_album_id">Invalid album ID</string>
+    <string name="album_id_not_found">Album ID not found</string>
+    <string name="error_loading_album">Error loading album data: %s</string>
+    <string name="album_not_found">Album not found</string>
+    <string name="could_not_update">Could not update: %s</string>
+    <string name="invalid_artist_id">Invalid artist ID</string>
+    <string name="artist_id_not_found">Artist ID not found</string>
+    <string name="error_loading_artist">Error loading artist data: %s</string>
+    <string name="could_not_find_artist">Could not find the artist</string>
+    <string name="no_valid_songs">No valid songs found to play</string>
 </resources>

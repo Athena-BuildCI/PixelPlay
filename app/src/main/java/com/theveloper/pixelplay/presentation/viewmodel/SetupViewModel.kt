@@ -9,11 +9,13 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.theveloper.pixelplay.data.preferences.UserPreferencesRepository
+import com.theveloper.pixelplay.data.repository.MusicRepository
 import com.theveloper.pixelplay.data.worker.SyncManager
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -45,11 +47,20 @@ data class SetupUiState(
 class SetupViewModel @Inject constructor(
     private val userPreferencesRepository: UserPreferencesRepository,
     private val syncManager: SyncManager,
+    private val musicRepository: MusicRepository,
     @ApplicationContext private val context: Context
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(SetupUiState())
     val uiState = _uiState.asStateFlow()
+    
+    /**
+     * Expose sync progress for UI to show during initial setup
+     */
+    /**
+     * Expose sync progress for UI to show during initial setup
+     */
+    val isSyncing = syncManager.isSyncing
 
     private val fileExplorerStateHolder = FileExplorerStateHolder(userPreferencesRepository, viewModelScope, context)
 
@@ -61,9 +72,24 @@ class SetupViewModel @Inject constructor(
     val isLoadingDirectories = fileExplorerStateHolder.isLoading
 
     init {
+        // Consolidated collectors using combine() to reduce coroutine overhead
         viewModelScope.launch {
-            userPreferencesRepository.blockedDirectoriesFlow.collect { blocked ->
-                _uiState.update { it.copy(blockedDirectories = blocked) }
+            combine(
+                userPreferencesRepository.blockedDirectoriesFlow,
+                userPreferencesRepository.libraryNavigationModeFlow,
+                userPreferencesRepository.navBarStyleFlow,
+                userPreferencesRepository.navBarCornerRadiusFlow
+            ) { blocked, mode, style, radius ->
+                SetupPrefsUpdate(blocked, mode, style, radius)
+            }.collect { update ->
+                _uiState.update { state ->
+                    state.copy(
+                        blockedDirectories = update.blocked,
+                        libraryNavigationMode = update.mode,
+                        navBarStyle = update.style,
+                        navBarCornerRadius = update.radius
+                    )
+                }
             }
         }
 
@@ -72,25 +98,14 @@ class SetupViewModel @Inject constructor(
                 _uiState.update { it.copy(isLoadingDirectories = loading) }
             }
         }
-
-        viewModelScope.launch {
-            userPreferencesRepository.libraryNavigationModeFlow.collect { mode ->
-                _uiState.update { it.copy(libraryNavigationMode = mode) }
-            }
-        }
-
-        viewModelScope.launch {
-            userPreferencesRepository.navBarStyleFlow.collect { style ->
-                _uiState.update { it.copy(navBarStyle = style) }
-            }
-        }
-
-        viewModelScope.launch {
-            userPreferencesRepository.navBarCornerRadiusFlow.collect { radius ->
-                _uiState.update { it.copy(navBarCornerRadius = radius) }
-            }
-        }
     }
+    
+    private data class SetupPrefsUpdate(
+        val blocked: Set<String>,
+        val mode: String,
+        val style: String,
+        val radius: Int
+    )
 
     fun checkPermissions(context: Context) {
         val mediaPermissionGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -144,8 +159,10 @@ class SetupViewModel @Inject constructor(
     }
 
     fun toggleDirectoryAllowed(file: File) {
-        fileExplorerStateHolder.toggleDirectoryAllowed(file)
-        syncManager.sync()
+        viewModelScope.launch {
+            fileExplorerStateHolder.toggleDirectoryAllowed(file)
+            syncManager.forceRefresh()
+        }
     }
 
     fun loadDirectory(file: File) {
@@ -194,6 +211,16 @@ class SetupViewModel @Inject constructor(
         viewModelScope.launch {
             userPreferencesRepository.setInitialSetupDone(true)
             // Use fullSync which bypasses MIN_SYNC_INTERVAL check and uses FULL mode
+            syncManager.fullSync()
+        }
+    }
+    
+    /**
+     * Retry the initial sync if it failed.
+     * Can be called from UI when user wants to retry after a failure.
+     */
+    fun retrySync() {
+        viewModelScope.launch {
             syncManager.fullSync()
         }
     }

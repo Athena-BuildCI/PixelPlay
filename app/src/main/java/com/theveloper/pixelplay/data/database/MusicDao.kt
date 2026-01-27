@@ -1,5 +1,6 @@
 package com.theveloper.pixelplay.data.database
 
+import androidx.paging.PagingSource
 import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
@@ -151,6 +152,25 @@ interface MusicDao {
     @Query("SELECT COUNT(*) FROM songs")
     fun getSongCount(): Flow<Int>
 
+    @Query("SELECT COUNT(*) FROM songs")
+    suspend fun getSongCountOnce(): Int
+
+    /**
+     * Returns random songs for efficient shuffle without loading all songs into memory.
+     * Uses SQLite RANDOM() for true randomness.
+     */
+    @Query("""
+        SELECT * FROM songs
+        WHERE (:applyDirectoryFilter = 0 OR parent_directory_path IN (:allowedParentDirs))
+        ORDER BY RANDOM()
+        LIMIT :limit
+    """)
+    suspend fun getRandomSongs(
+        limit: Int,
+        allowedParentDirs: List<String> = emptyList(),
+        applyDirectoryFilter: Boolean = false
+    ): List<SongEntity>
+
     @Query("""
         SELECT * FROM songs
         WHERE (:applyDirectoryFilter = 0 OR parent_directory_path IN (:allowedParentDirs))
@@ -159,6 +179,21 @@ interface MusicDao {
         allowedParentDirs: List<String> = emptyList(),
         applyDirectoryFilter: Boolean = false
     ): Flow<List<SongEntity>>
+    
+    // --- Paginated Queries for Large Libraries ---
+    /**
+     * Returns a PagingSource for songs, enabling efficient pagination for large libraries.
+     * Room auto-generates the PagingSource implementation.
+     */
+    @Query("""
+        SELECT * FROM songs
+        WHERE (:applyDirectoryFilter = 0 OR parent_directory_path IN (:allowedParentDirs))
+        ORDER BY title ASC
+    """)
+    fun getSongsPaginated(
+        allowedParentDirs: List<String>,
+        applyDirectoryFilter: Boolean
+    ): PagingSource<Int, SongEntity>
 
     // --- Album Queries ---
     @Query("""
@@ -274,6 +309,12 @@ interface MusicDao {
     @Query("UPDATE artists SET image_url = :imageUrl WHERE id = :artistId")
     suspend fun updateArtistImageUrl(artistId: Long, imageUrl: String)
 
+    @Query("SELECT id FROM artists WHERE name = :name LIMIT 1")
+    suspend fun getArtistIdByName(name: String): Long?
+
+    @Query("SELECT MAX(id) FROM artists")
+    suspend fun getMaxArtistId(): Long?
+
     // --- Genre Queries ---
     // Example: Get all songs for a specific genre
     @Query("""
@@ -378,6 +419,9 @@ interface MusicDao {
 
     @Query("SELECT * FROM song_artist_cross_ref")
     fun getAllSongArtistCrossRefs(): Flow<List<SongArtistCrossRef>>
+
+    @Query("SELECT * FROM song_artist_cross_ref")
+    suspend fun getAllSongArtistCrossRefsList(): List<SongArtistCrossRef>
 
     @Query("DELETE FROM song_artist_cross_ref")
     suspend fun clearAllSongArtistCrossRefs()

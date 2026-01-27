@@ -12,6 +12,9 @@ import coil.disk.DiskCache
 import coil.memory.MemoryCache
 import com.theveloper.pixelplay.PixelPlayApplication
 import com.theveloper.pixelplay.data.database.AlbumArtThemeDao
+import com.theveloper.pixelplay.data.database.EngagementDao
+import com.theveloper.pixelplay.data.database.FavoritesDao
+import com.theveloper.pixelplay.data.database.LyricsDao
 import com.theveloper.pixelplay.data.database.MusicDao
 import com.theveloper.pixelplay.data.database.PixelPlayDatabase
 import com.theveloper.pixelplay.data.database.SearchHistoryDao
@@ -81,9 +84,11 @@ object AppModule {
             PixelPlayDatabase.MIGRATION_4_5,
             PixelPlayDatabase.MIGRATION_6_7,
             PixelPlayDatabase.MIGRATION_9_10,
-            PixelPlayDatabase.MIGRATION_10_11
-        )
-            .fallbackToDestructiveMigration(dropAllTables = true)
+            PixelPlayDatabase.MIGRATION_10_11,
+            PixelPlayDatabase.MIGRATION_11_12,
+            PixelPlayDatabase.MIGRATION_12_13,
+            PixelPlayDatabase.MIGRATION_13_14
+        ).fallbackToDestructiveMigration(dropAllTables = true)
             .build()
     }
 
@@ -109,6 +114,24 @@ object AppModule {
     @Provides
     fun provideTransitionDao(database: PixelPlayDatabase): TransitionDao {
         return database.transitionDao()
+    }
+
+    @Singleton
+    @Provides
+    fun provideEngagementDao(database: PixelPlayDatabase): EngagementDao {
+        return database.engagementDao()
+    }
+
+    @Singleton
+    @Provides
+    fun provideFavoritesDao(database: PixelPlayDatabase): FavoritesDao {
+        return database.favoritesDao()
+    }
+
+    @Singleton
+    @Provides
+    fun provideLyricsDao(database: PixelPlayDatabase): LyricsDao {
+        return database.lyricsDao()
     }
 
     @Provides
@@ -139,12 +162,30 @@ object AppModule {
     fun provideLyricsRepository(
         @ApplicationContext context: Context,
         lrcLibApiService: LrcLibApiService,
-        musicDao: MusicDao
+        musicDao: MusicDao,
+        lyricsDao: LyricsDao
     ): LyricsRepository {
         return LyricsRepositoryImpl(
             context = context,
             lrcLibApiService = lrcLibApiService,
-            musicDao = musicDao
+            //musicDao = musicDao,
+            lyricsDao = lyricsDao
+        )
+    }
+
+    @Provides
+    @Singleton
+    fun provideSongRepository(
+        @ApplicationContext context: Context,
+        mediaStoreObserver: com.theveloper.pixelplay.data.observer.MediaStoreObserver,
+        favoritesDao: FavoritesDao,
+        userPreferencesRepository: UserPreferencesRepository
+    ): com.theveloper.pixelplay.data.repository.SongRepository {
+        return com.theveloper.pixelplay.data.repository.MediaStoreSongRepository(
+            context = context,
+            mediaStoreObserver = mediaStoreObserver,
+            favoritesDao = favoritesDao,
+            userPreferencesRepository = userPreferencesRepository
         )
     }
 
@@ -154,15 +195,19 @@ object AppModule {
         @ApplicationContext context: Context,
         userPreferencesRepository: UserPreferencesRepository,
         searchHistoryDao: SearchHistoryDao,
-        musicDao: MusicDao, // Añadir MusicDao como parámetro
-        lyricsRepository: LyricsRepository
+        musicDao: MusicDao,
+        lyricsRepository: LyricsRepository,
+        songRepository: com.theveloper.pixelplay.data.repository.SongRepository,
+        favoritesDao: FavoritesDao
     ): MusicRepository {
         return MusicRepositoryImpl(
             context = context,
             userPreferencesRepository = userPreferencesRepository,
             searchHistoryDao = searchHistoryDao,
             musicDao = musicDao,
-            lyricsRepository = lyricsRepository
+            lyricsRepository = lyricsRepository,
+            songRepository = songRepository,
+            favoritesDao = favoritesDao
         )
     }
 
@@ -190,9 +235,9 @@ object AppModule {
         val loggingInterceptor = HttpLoggingInterceptor()
         loggingInterceptor.setLevel(HttpLoggingInterceptor.Level.BODY)
         
-        // Connection pool with limited connections to avoid overwhelming servers
+        // Connection pool with optimized connections for better performance
         val connectionPool = okhttp3.ConnectionPool(
-            maxIdleConnections = 2,
+            maxIdleConnections = 5,
             keepAliveDuration = 30,
             timeUnit = java.util.concurrent.TimeUnit.SECONDS
         )
@@ -251,9 +296,9 @@ object AppModule {
         val loggingInterceptor = HttpLoggingInterceptor()
         loggingInterceptor.setLevel(HttpLoggingInterceptor.Level.HEADERS)
         
-        // Connection pool to reuse connections
+        // Connection pool to reuse connections for better performance
         val connectionPool = okhttp3.ConnectionPool(
-            maxIdleConnections = 2,
+            maxIdleConnections = 5,
             keepAliveDuration = 30,
             timeUnit = java.util.concurrent.TimeUnit.SECONDS
         )

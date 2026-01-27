@@ -83,6 +83,7 @@ class MusicService : MediaSessionService() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var keepPlayingInBackground = true
     private var isManualShuffleEnabled = false
+    private var persistentShuffleEnabled = false
     // --- Counted Play State ---
     private var countedPlayActive = false
     private var countedPlayTarget = 0
@@ -98,6 +99,9 @@ class MusicService : MediaSessionService() {
 
     override fun onCreate() {
         super.onCreate()
+        
+        // Ensure engine is ready (re-initialize if service was restarted)
+        engine.initialize()
 
         engine.masterPlayer.addListener(playerListener)
 
@@ -120,6 +124,21 @@ class MusicService : MediaSessionService() {
         serviceScope.launch {
             userPreferencesRepository.keepPlayingInBackgroundFlow.collect { enabled ->
                 keepPlayingInBackground = enabled
+            }
+        }
+
+        serviceScope.launch {
+            userPreferencesRepository.persistentShuffleEnabledFlow.collect { enabled ->
+                persistentShuffleEnabled = enabled
+            }
+        }
+
+        // Initialize shuffle state from preferences
+        serviceScope.launch {
+            val persistent = userPreferencesRepository.persistentShuffleEnabledFlow.first()
+            if (persistent) {
+                isManualShuffleEnabled = userPreferencesRepository.isShuffleOnFlow.first()
+                mediaSession?.let { refreshMediaSessionUi(it) }
             }
         }
 
@@ -521,6 +540,13 @@ class MusicService : MediaSessionService() {
     ) {
         val changed = isManualShuffleEnabled != enabled
         isManualShuffleEnabled = enabled
+        
+        if (persistentShuffleEnabled) {
+            serviceScope.launch {
+                userPreferencesRepository.setShuffleOn(enabled)
+            }
+        }
+
         if (broadcast && changed) {
             val args = Bundle().apply {
                 putBoolean(MusicNotificationProvider.EXTRA_SHUFFLE_ENABLED, enabled)

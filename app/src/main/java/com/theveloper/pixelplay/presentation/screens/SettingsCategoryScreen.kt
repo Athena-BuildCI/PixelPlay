@@ -72,6 +72,7 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.media3.common.util.UnstableApi
 import androidx.navigation.NavController
 import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
@@ -82,6 +83,7 @@ import com.theveloper.pixelplay.data.preferences.LaunchTab
 import com.theveloper.pixelplay.data.preferences.LibraryNavigationMode
 import com.theveloper.pixelplay.data.preferences.NavBarStyle
 import com.theveloper.pixelplay.data.preferences.ThemePreference
+import com.theveloper.pixelplay.data.model.LyricsSourcePreference
 import com.theveloper.pixelplay.data.worker.SyncProgress
 import com.theveloper.pixelplay.presentation.components.ExpressiveTopBarContent
 import com.theveloper.pixelplay.presentation.components.FileExplorerDialog
@@ -92,6 +94,7 @@ import com.theveloper.pixelplay.presentation.viewmodel.LyricsRefreshProgress
 import com.theveloper.pixelplay.presentation.viewmodel.PlayerViewModel
 import com.theveloper.pixelplay.presentation.viewmodel.SettingsViewModel
 
+@androidx.annotation.OptIn(UnstableApi::class)
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsCategoryScreen(
@@ -286,6 +289,31 @@ fun SettingsCategoryScreen(
                                 onClick = { showClearLyricsDialog = true }
                             )
                             Spacer(Modifier.height(4.dp))
+                            ThemeSelectorItem(
+                                label = "Lyrics Source Priority",
+                                description = "Choose which source to try first when fetching lyrics.",
+                                options = mapOf(
+                                    LyricsSourcePreference.EMBEDDED_FIRST.name to "Embedded First",
+                                    LyricsSourcePreference.API_FIRST.name to "Online First",
+                                    LyricsSourcePreference.LOCAL_FIRST.name to "Local (.lrc) First"
+                                ),
+                                selectedKey = uiState.lyricsSourcePreference.name,
+                                onSelectionChanged = { key ->
+                                    settingsViewModel.setLyricsSourcePreference(
+                                        LyricsSourcePreference.fromName(key)
+                                    )
+                                },
+                                leadingIcon = { Icon(painterResource(R.drawable.rounded_lyrics_24), null, tint = MaterialTheme.colorScheme.secondary) }
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            SwitchSettingItem(
+                                title = "Auto-scan .lrc files",
+                                subtitle = "Automatically scan and assign .lrc files in the same folder during library sync.",
+                                checked = uiState.autoScanLrcFiles,
+                                onCheckedChange = { settingsViewModel.setAutoScanLrcFiles(it) },
+                                leadingIcon = { Icon(Icons.Outlined.Folder, null, tint = MaterialTheme.colorScheme.secondary) }
+                            )
+                            Spacer(Modifier.height(4.dp))
                             SettingsItem(
                                 title = "Artists",
                                 subtitle = "Multi-artist parsing and organization options.",
@@ -295,6 +323,17 @@ fun SettingsCategoryScreen(
                             )
                         }
                         SettingsCategory.APPEARANCE -> {
+                            val useSmoothCorners by settingsViewModel.useSmoothCorners.collectAsState()
+
+                            SwitchSettingItem(
+                                title = "Use Smooth Corners",
+                                subtitle = "Use complex shaped corners effectively improving aesthetics but may affect performance on low-end devices",
+                                checked = useSmoothCorners,
+                                onCheckedChange = settingsViewModel::setUseSmoothCorners,
+                                leadingIcon = { Icon(painterResource(R.drawable.rounded_rounded_corner_24), null, tint = MaterialTheme.colorScheme.secondary) }
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            
                             ThemeSelectorItem(
                                 label = "App Theme",
                                 description = "Switch between light, dark, or follow system appearance.",
@@ -331,7 +370,7 @@ fun SettingsCategoryScreen(
                                 onSelectionChanged = { settingsViewModel.setNavBarStyle(it) },
                                 leadingIcon = { Icon(Icons.Outlined.Style, null, tint = MaterialTheme.colorScheme.secondary) }
                             )
-                            if (uiState.navBarStyle == NavBarStyle.DEFAULT) {
+                            // if (uiState.navBarStyle == NavBarStyle.DEFAULT) { // Allow for both modes now
                                 Spacer(Modifier.height(4.dp))
                                 SettingsItem(
                                     title = "NavBar Corner Radius",
@@ -340,7 +379,7 @@ fun SettingsCategoryScreen(
                                     trailingIcon = { Icon(Icons.Rounded.ChevronRight, null, tint = MaterialTheme.colorScheme.onSurfaceVariant) },
                                     onClick = { navController.navigate("nav_bar_corner_radius") }
                                 )
-                            }
+                            //}
                             Spacer(Modifier.height(4.dp))
                             ThemeSelectorItem(
                                 label = "Carousel Style",
@@ -418,6 +457,14 @@ fun SettingsCategoryScreen(
                             }
                             Spacer(Modifier.height(4.dp))
                             SwitchSettingItem(
+                                title = "Persistent Shuffle",
+                                subtitle = "Remember shuffle setting even after closing the app.",
+                                checked = uiState.persistentShuffleEnabled,
+                                onCheckedChange = { settingsViewModel.setPersistentShuffleEnabled(it) },
+                                leadingIcon = { Icon(painterResource(R.drawable.rounded_shuffle_24), null, tint = MaterialTheme.colorScheme.secondary) }
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            SwitchSettingItem(
                                 title = "Show queue history",
                                 subtitle = "Show previously played songs in the queue.",
                                 checked = uiState.showQueueHistory,
@@ -449,6 +496,14 @@ fun SettingsCategoryScreen(
                                     }
                                 },
                                 leadingIcon = { Icon(painterResource(R.drawable.rounded_all_inclusive_24), null, tint = MaterialTheme.colorScheme.secondary) }
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            SwitchSettingItem(
+                                title = "Tap background closes player",
+                                subtitle = "Tap the blurred background to close the player sheet.",
+                                checked = uiState.tapBackgroundClosesPlayer,
+                                onCheckedChange = { settingsViewModel.setTapBackgroundClosesPlayer(it) },
+                                leadingIcon = { Icon(painterResource(R.drawable.rounded_touch_app_24), null, tint = MaterialTheme.colorScheme.secondary) }
                             )
                         }
                         SettingsCategory.AI_INTEGRATION -> {

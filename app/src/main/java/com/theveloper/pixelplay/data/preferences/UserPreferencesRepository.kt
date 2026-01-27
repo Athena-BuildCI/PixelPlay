@@ -14,6 +14,7 @@ import androidx.datastore.preferences.preferencesDataStore
 import androidx.media3.common.Player
 import com.theveloper.pixelplay.data.model.Playlist
 import com.theveloper.pixelplay.data.model.SortOption // Added import
+import com.theveloper.pixelplay.data.model.LyricsSourcePreference
 import com.theveloper.pixelplay.data.model.TransitionSettings
 import com.theveloper.pixelplay.data.equalizer.EqualizerPreset // Added import
 import java.util.UUID
@@ -41,6 +42,21 @@ object AppThemeMode {
     const val FOLLOW_SYSTEM = "follow_system"
     const val LIGHT = "light"
     const val DARK = "dark"
+}
+
+/**
+ * Album art quality settings for developer options.
+ * Controls maximum resolution for album artwork in player view.
+ * Thumbnails in lists always use low resolution for performance.
+ * 
+ * @property maxSize Maximum size in pixels (0 = original size)
+ * @property label Human-readable label for UI
+ */
+enum class AlbumArtQuality(val maxSize: Int, val label: String) {
+    LOW(256, "Low (256px) - Better performance"),
+    MEDIUM(512, "Medium (512px) - Balanced"),
+    HIGH(800, "High (800px) - Best quality"),
+    ORIGINAL(0, "Original - Maximum quality")
 }
 
 @Singleton
@@ -81,6 +97,7 @@ constructor(
         val MOCK_GENRES_ENABLED = booleanPreferencesKey("mock_genres_enabled")
         val LAST_DAILY_MIX_UPDATE = longPreferencesKey("last_daily_mix_update")
         val DAILY_MIX_SONG_IDS = stringPreferencesKey("daily_mix_song_ids")
+        val YOUR_MIX_SONG_IDS = stringPreferencesKey("your_mix_song_ids")
         val NAV_BAR_CORNER_RADIUS = intPreferencesKey("nav_bar_corner_radius")
         val NAV_BAR_STYLE = stringPreferencesKey("nav_bar_style")
         val CAROUSEL_STYLE = stringPreferencesKey("carousel_style")
@@ -92,10 +109,13 @@ constructor(
         val LIBRARY_TABS_ORDER = stringPreferencesKey("library_tabs_order")
         val IS_FOLDER_FILTER_ACTIVE = booleanPreferencesKey("is_folder_filter_active")
         val IS_FOLDERS_PLAYLIST_VIEW = booleanPreferencesKey("is_folders_playlist_view")
+        val USE_SMOOTH_CORNERS = booleanPreferencesKey("use_smooth_corners")
         val KEEP_PLAYING_IN_BACKGROUND = booleanPreferencesKey("keep_playing_in_background")
         val IS_CROSSFADE_ENABLED = booleanPreferencesKey("is_crossfade_enabled")
         val CROSSFADE_DURATION = intPreferencesKey("crossfade_duration")
         val REPEAT_MODE = intPreferencesKey("repeat_mode")
+        val IS_SHUFFLE_ON = booleanPreferencesKey("is_shuffle_on")
+        val PERSISTENT_SHUFFLE_ENABLED = booleanPreferencesKey("persistent_shuffle_enabled")
         val DISABLE_CAST_AUTOPLAY = booleanPreferencesKey("disable_cast_autoplay")
         val SHOW_QUEUE_HISTORY = booleanPreferencesKey("show_queue_history")
         val FULL_PLAYER_DELAY_ALL = booleanPreferencesKey("full_player_delay_all")
@@ -142,6 +162,14 @@ constructor(
         
         // Lyrics Sync Offset per song (Map<songId, offsetMs> as JSON)
         val LYRICS_SYNC_OFFSETS = stringPreferencesKey("lyrics_sync_offsets_json")
+        
+        // Lyrics Source Preference
+        val LYRICS_SOURCE_PREFERENCE = stringPreferencesKey("lyrics_source_preference")
+        val AUTO_SCAN_LRC_FILES = booleanPreferencesKey("auto_scan_lrc_files")
+        
+        // Developer Options
+        val ALBUM_ART_QUALITY = stringPreferencesKey("album_art_quality")
+        val TAP_BACKGROUND_CLOSES_PLAYER = booleanPreferencesKey("tap_background_closes_player")
     }
 
     val appRebrandDialogShownFlow: Flow<Boolean> =
@@ -271,6 +299,24 @@ constructor(
         dataStore.edit { preferences -> preferences[PreferencesKeys.REPEAT_MODE] = mode }
     }
 
+    val isShuffleOnFlow: Flow<Boolean> =
+            dataStore.data.map { preferences ->
+                preferences[PreferencesKeys.IS_SHUFFLE_ON] ?: false
+            }
+
+    suspend fun setShuffleOn(on: Boolean) {
+        dataStore.edit { preferences -> preferences[PreferencesKeys.IS_SHUFFLE_ON] = on }
+    }
+
+    val persistentShuffleEnabledFlow: Flow<Boolean> =
+            dataStore.data.map { preferences ->
+                preferences[PreferencesKeys.PERSISTENT_SHUFFLE_ENABLED] ?: false
+            }
+
+    suspend fun setPersistentShuffleEnabled(enabled: Boolean) {
+        dataStore.edit { preferences -> preferences[PreferencesKeys.PERSISTENT_SHUFFLE_ENABLED] = enabled }
+    }
+
     // ===== Multi-Artist Settings =====
 
     val artistDelimitersFlow: Flow<List<String>> =
@@ -396,6 +442,32 @@ constructor(
 
     // ===== End Lyrics Sync Offset Settings =====
 
+    // ===== Lyrics Source Preference Settings =====
+    
+    val lyricsSourcePreferenceFlow: Flow<LyricsSourcePreference> =
+            dataStore.data.map { preferences ->
+                LyricsSourcePreference.fromName(preferences[PreferencesKeys.LYRICS_SOURCE_PREFERENCE])
+            }
+
+    suspend fun setLyricsSourcePreference(preference: LyricsSourcePreference) {
+        dataStore.edit { preferences ->
+            preferences[PreferencesKeys.LYRICS_SOURCE_PREFERENCE] = preference.name
+        }
+    }
+
+    val autoScanLrcFilesFlow: Flow<Boolean> =
+            dataStore.data.map { preferences ->
+                preferences[PreferencesKeys.AUTO_SCAN_LRC_FILES] ?: false
+            }
+
+    suspend fun setAutoScanLrcFiles(enabled: Boolean) {
+        dataStore.edit { preferences ->
+            preferences[PreferencesKeys.AUTO_SCAN_LRC_FILES] = enabled
+        }
+    }
+
+    // ===== End Lyrics Source Preference Settings =====
+
     // ===== End Multi-Artist Settings =====
 
     val globalTransitionSettingsFlow: Flow<TransitionSettings> =
@@ -438,6 +510,26 @@ constructor(
     suspend fun saveDailyMixSongIds(songIds: List<String>) {
         dataStore.edit { preferences ->
             preferences[PreferencesKeys.DAILY_MIX_SONG_IDS] = json.encodeToString(songIds)
+        }
+    }
+
+    val yourMixSongIdsFlow: Flow<List<String>> =
+            dataStore.data.map { preferences ->
+                val jsonString = preferences[PreferencesKeys.YOUR_MIX_SONG_IDS]
+                if (jsonString != null) {
+                    try {
+                        json.decodeFromString<List<String>>(jsonString)
+                    } catch (e: Exception) {
+                        emptyList()
+                    }
+                } else {
+                    emptyList()
+                }
+            }
+
+    suspend fun saveYourMixSongIds(songIds: List<String>) {
+        dataStore.edit { preferences ->
+            preferences[PreferencesKeys.YOUR_MIX_SONG_IDS] = json.encodeToString(songIds)
         }
     }
 
@@ -490,7 +582,7 @@ constructor(
 
     val showQueueHistoryFlow: Flow<Boolean> =
             dataStore.data.map { preferences ->
-                preferences[PreferencesKeys.SHOW_QUEUE_HISTORY] ?: true
+                preferences[PreferencesKeys.SHOW_QUEUE_HISTORY] ?: false  // Default to false for performance
             }
 
     suspend fun setShowQueueHistory(show: Boolean) {
@@ -1177,10 +1269,21 @@ constructor(
         }
     }
 
-    val isFoldersPlaylistViewFlow: Flow<Boolean> =
-            dataStore.data.map { preferences ->
-                preferences[PreferencesKeys.IS_FOLDERS_PLAYLIST_VIEW] ?: false
-            }
+    val isFoldersPlaylistViewFlow: Flow<Boolean> = dataStore.data
+        .map { preferences ->
+            preferences[PreferencesKeys.IS_FOLDERS_PLAYLIST_VIEW] ?: false
+        }
+
+    val useSmoothCornersFlow: Flow<Boolean> = dataStore.data
+        .map { preferences ->
+            preferences[PreferencesKeys.USE_SMOOTH_CORNERS] ?: true
+        }
+
+    suspend fun setUseSmoothCorners(enabled: Boolean) {
+        dataStore.edit { preferences ->
+            preferences[PreferencesKeys.USE_SMOOTH_CORNERS] = enabled
+        }
+    }
 
     suspend fun setFoldersPlaylistView(isPlaylistView: Boolean) {
         dataStore.edit { preferences ->
@@ -1318,6 +1421,44 @@ constructor(
     suspend fun setPinnedPresets(presetNames: List<String>) {
         dataStore.edit { preferences ->
             preferences[PreferencesKeys.PINNED_PRESETS] = json.encodeToString(presetNames)
+        }
+    }
+
+    // ===== Developer Options =====
+    
+    /**
+     * Album art quality for player view.
+     * Controls the maximum resolution for album artwork displayed in the full player.
+     * Thumbnails in lists always use low resolution (256px) for optimal performance.
+     */
+    val albumArtQualityFlow: Flow<AlbumArtQuality> =
+        dataStore.data.map { preferences ->
+            preferences[PreferencesKeys.ALBUM_ART_QUALITY]
+                ?.let { 
+                    try { AlbumArtQuality.valueOf(it) } 
+                    catch (e: Exception) { AlbumArtQuality.ORIGINAL }
+                }
+                ?: AlbumArtQuality.ORIGINAL
+        }
+
+    suspend fun setAlbumArtQuality(quality: AlbumArtQuality) {
+        dataStore.edit { preferences ->
+            preferences[PreferencesKeys.ALBUM_ART_QUALITY] = quality.name
+        }
+    }
+
+    /**
+     * Whether tapping the background area of the player sheet closes it.
+     * Default is true for intuitive dismissal, but power users may prefer to disable this.
+     */
+    val tapBackgroundClosesPlayerFlow: Flow<Boolean> =
+        dataStore.data.map { preferences ->
+            preferences[PreferencesKeys.TAP_BACKGROUND_CLOSES_PLAYER] ?: true
+        }
+
+    suspend fun setTapBackgroundClosesPlayer(enabled: Boolean) {
+        dataStore.edit { preferences ->
+            preferences[PreferencesKeys.TAP_BACKGROUND_CLOSES_PLAYER] = enabled
         }
     }
 }

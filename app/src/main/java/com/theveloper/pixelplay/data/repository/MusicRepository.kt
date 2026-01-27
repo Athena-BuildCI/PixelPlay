@@ -1,9 +1,11 @@
 package com.theveloper.pixelplay.data.repository
 
 import android.net.Uri
+import androidx.paging.PagingData
 import com.theveloper.pixelplay.data.model.Album
 import com.theveloper.pixelplay.data.model.Artist
 import com.theveloper.pixelplay.data.model.Lyrics
+import com.theveloper.pixelplay.data.model.LyricsSourcePreference
 import com.theveloper.pixelplay.data.model.Playlist
 import com.theveloper.pixelplay.data.model.SearchFilterType
 import com.theveloper.pixelplay.data.model.SearchHistoryItem
@@ -17,6 +19,26 @@ interface MusicRepository {
      * @return Flow que emite una lista completa de objetos Song.
      */
     fun getAudioFiles(): Flow<List<Song>> // Existing Flow for reactive updates
+    
+    /**
+     * Returns paginated songs for efficient display of large libraries.
+     * @return Flow of PagingData<Song> for use with LazyPagingItems.
+     */
+    fun getPaginatedSongs(): Flow<PagingData<Song>>
+
+    /**
+     * Returns the count of songs in the library.
+     * @return Flow emitting the current song count.
+     */
+    fun getSongCountFlow(): Flow<Int>
+
+    /**
+     * Returns a random selection of songs for efficient shuffle.
+     * Uses database-level RANDOM() for performance.
+     * @param limit Maximum number of songs to return.
+     * @return List of randomly selected songs.
+     */
+    suspend fun getRandomSongs(limit: Int): List<Song>
 
     /**
      * Obtiene la lista de álbumes filtrada.
@@ -30,7 +52,12 @@ interface MusicRepository {
      */
     fun getArtists(): Flow<List<Artist>> // Existing Flow for reactive updates
 
-    // New suspend functions for one-shot data loading as per performance report
+    /**
+     * Obtiene la lista completa de canciones una sola vez.
+     * @return Lista de objetos Song.
+     */
+    suspend fun getAllSongsOnce(): List<Song>
+
     /**
      * Obtiene la lista completa de álbumes una sola vez.
      * @return Lista de objetos Album.
@@ -137,7 +164,11 @@ interface MusicRepository {
      */
     fun getGenres(): Flow<List<com.theveloper.pixelplay.data.model.Genre>>
 
-    suspend fun getLyrics(song: Song): Lyrics?
+    suspend fun getLyrics(
+        song: Song,
+        sourcePreference: LyricsSourcePreference = LyricsSourcePreference.EMBEDDED_FIRST,
+        forceRefresh: Boolean = false
+    ): Lyrics?
 
     suspend fun getLyricsFromRemote(song: Song): Result<Pair<Lyrics, String>>
 
@@ -147,6 +178,13 @@ interface MusicRepository {
      * @return The search query and the results
      */
     suspend fun searchRemoteLyrics(song: Song): Result<Pair<String, List<LyricsSearchResult>>>
+
+    /**
+     * Search for lyrics remotely using query provided, and not use song metadata
+     * @param query The query for searching, typically song title and artist name
+     * @return The search query and the results
+     */
+    suspend fun searchRemoteLyricsByQuery(title: String, artist: String? = null): Result<Pair<String, List<LyricsSearchResult>>>
 
     suspend fun updateLyrics(songId: Long, lyrics: String)
 
